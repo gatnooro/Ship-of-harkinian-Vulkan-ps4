@@ -18,7 +18,7 @@ It installs as its own title (`SOHV00001`, "Ship of Harkinian (Vulkan)") and kee
 
 ## Install
 
-1. Download `SoH-Vulkan-PS4-<version>.zip` from the Releases page and unzip it. It holds one `.pkg`.
+1. Download `SoH-Vulkan-PS4-<version>.pkg` from the Releases page. It is one `.pkg`.
 2. Install the `.pkg` with GoldHEN's package installer.
 3. Copy your `oot.o2r` to `/data/sohvk/` (create the folder if it is not there).
 4. Start "Ship of Harkinian (Vulkan)". The first start prepares the shaders, which takes a moment.
