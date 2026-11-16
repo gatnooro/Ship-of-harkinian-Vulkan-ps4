@@ -1,0 +1,27 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 1615e8c..11fa4b1 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -241,7 +241,8 @@ endif()
+ if(NOT MSVC)
+     set(CMAKE_CXX_FLAGS_DEBUG "-g")
+     set(CMAKE_CXX_FLAGS_RELEASE "-O3")
+-    set(CMAKE_CXX_FLAGS "-Wno-narrowing")
++    # keep the toolchain's flags (a cross build carries its sysroot and C++ library there)
++    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-narrowing")
+ else()
+     target_compile_options(${PROJECT_NAME} PRIVATE
+         $<$<CONFIG:Debug>:
+diff --git a/src/Companion.cpp b/src/Companion.cpp
+index f40676e..46b9762 100644
+--- a/src/Companion.cpp
++++ b/src/Companion.cpp
+@@ -190,7 +190,7 @@ void Companion::Init(const ExportType type) {
+ 
+ void Companion::Init(const ExportType type, std::atomic<size_t>& assetCount, bool shouldProcess) {
+     this->mShouldProcess = shouldProcess;
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     // PlayStation 5: one line for every asset is a megabyte of log nobody reads on a console
+     spdlog::set_level(spdlog::level::warn);
+ #else

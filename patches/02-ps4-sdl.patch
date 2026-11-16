@@ -1,0 +1,18 @@
+diff --git a/src/thread/pthread/SDL_syssem.c b/src/thread/pthread/SDL_syssem.c
+index 80fc5fa..63317b4 100644
+--- a/src/thread/pthread/SDL_syssem.c
++++ b/src/thread/pthread/SDL_syssem.c
+@@ -31,8 +31,11 @@
+ 
+ /* Wrapper around POSIX 1003.1b semaphores */
+ 
+-#if defined(__MACOSX__) || defined(__IPHONEOS__)
+-/* Mac OS X doesn't support sem_getvalue() as of version 10.4 */
++#if defined(__MACOSX__) || defined(__IPHONEOS__) || defined(__PS4__)
++/* Mac OS X doesn't support sem_getvalue() as of version 10.4.
++ * PS4: the OpenOrbis libc's sem_wait does not block (it hands the sem_t itself to ksem_timedwait
++ * as a semaphore id), so SDL_CreateThread freed its arguments while the new thread still read them
++ * (SDL_RunAudio on a stale device: the startup crashes and silent sessions): mutex + condition. */
+ #include "../generic/SDL_syssem.c"
+ #else
+ 

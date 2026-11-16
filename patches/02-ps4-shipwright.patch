@@ -1,0 +1,1024 @@
+diff --git a/soh/include/functions.h b/soh/include/functions.h
+index 5aa04316..a381b768 100644
+--- a/soh/include/functions.h
++++ b/soh/include/functions.h
+@@ -63,7 +63,7 @@ u32 Locale_IsRegionNative(void);
+ void _assert(const char* exp, const char* file, s32 line);
+ #elif defined(__linux__)
+ void __assert(const char* exp, const char* file, s32 line) __THROW;
+-#elif !defined(__APPLE__) && !defined(__SWITCH__) && !defined(__OpenBSD__) && !defined(__PROSPERO__)
++#elif !defined(__APPLE__) && !defined(__SWITCH__) && !defined(__OpenBSD__) && !defined(__PROSPERO__) && !defined(__PS4__)
+ void __assert(const char* exp, const char* file, s32 line);
+ #endif
+ #if defined(__APPLE__) && defined(NDEBUG)
+diff --git a/soh/soh/Enhancements/bootcommands.c b/soh/soh/Enhancements/bootcommands.c
+index 82cb18d5..4b16e33e 100644
+--- a/soh/soh/Enhancements/bootcommands.c
++++ b/soh/soh/Enhancements/bootcommands.c
+@@ -9,7 +9,7 @@ void BootCommands_Init() {
+     CVarClear(CVAR_GENERAL("OnFileSelectNameEntry")); // Clear when soh is killed on the file name entry page
+     CVarClear(CVAR_GENERAL("BetterDebugWarpScreenMQMode"));
+     CVarClear(CVAR_GENERAL("BetterDebugWarpScreenMQModeScene"));
+-#if defined(__SWITCH__) || defined(__WIIU__) || defined(__PROSPERO__)
++#if defined(__SWITCH__) || defined(__WIIU__) || defined(__PROSPERO__) || defined(__PS4__)
+     CVarRegisterInteger(CVAR_IMGUI_CONTROLLER_NAV, 1); // always enable controller nav on switch/wii u
+ #endif
+ }
+diff --git a/soh/soh/Enhancements/mod_menu.cpp b/soh/soh/Enhancements/mod_menu.cpp
+index 28ec3489..e452af30 100644
+--- a/soh/soh/Enhancements/mod_menu.cpp
++++ b/soh/soh/Enhancements/mod_menu.cpp
+@@ -271,7 +271,7 @@ void UpdateModFiles(bool init = false, bool reset = false) {
+             SetEnabledModsCVarValue();
+         }
+     }
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     // PlayStation button prompts (ps5/tools/make-prompts.py, in the title's folder): added
+     // after the mods so their glyphs win over the ROM's and a texture pack's; Settings >
+     // General "PlayStation Button Prompts"
+diff --git a/soh/soh/Extractor/Extract.cpp b/soh/soh/Extractor/Extract.cpp
+index a0d81269..e43bcaf9 100644
+--- a/soh/soh/Extractor/Extract.cpp
++++ b/soh/soh/Extractor/Extract.cpp
+@@ -228,7 +228,7 @@ void Extractor::FilterRoms(std::vector<std::string>& roms, RomSearchMode searchM
+     }
+ }
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+ // PlayStation 5: ROM extensions match in any case (OOT.Z64 is found too)
+ static bool PS5IsRomExt(std::string ext) {
+     for (auto& c : ext) c = (char)tolower((unsigned char)c);
+@@ -270,7 +270,7 @@ void Extractor::GetRoms(std::vector<std::string>& roms) {
+ 
+                 // Get the position of the extension character.
+                 char* ext = strrchr(dir->d_name, '.');
+-                #ifdef __PROSPERO__
++                #if defined(__PROSPERO__) || defined(__PS4__)
+                 if (ext != NULL && PS5IsRomExt(ext)) {
+ #else
+                 if (ext != NULL && (strcmp(ext, ".z64") == 0 || strcmp(ext, ".n64") == 0 || strcmp(ext, ".v64") == 0)) {
+@@ -285,7 +285,7 @@ void Extractor::GetRoms(std::vector<std::string>& roms) {
+     for (const auto& file : std::filesystem::directory_iterator(mSearchPath)) {
+         if (file.is_directory())
+             continue;
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+         if (PS5IsRomExt(file.path().extension().string())) {
+ #else
+         if ((file.path().extension() == ".n64") || (file.path().extension() == ".z64") ||
+@@ -497,7 +497,7 @@ bool Extractor::ManuallySearchForRomMatchingType(RomSearchMode searchMode) {
+ }
+ 
+ bool Extractor::RunFileStandalone(std::string rom) {
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     // PlayStation 5: the same checks, no message boxes, and the reason kept for the screen and the log
+     mLastError.clear();
+     if (std::filesystem::is_directory(rom)) {
+@@ -685,12 +685,12 @@ const char* Extractor::GetTorchVersionDir() const {
+     }
+ }
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+ extern "C" const char* ps5_data_dir(void);
+ #endif
+ 
+ std::string Extractor::Mkdtemp() {
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     // PlayStation 5: there is no /tmp; work in the data folder's .tmp (same file system
+     // as the archive's destination)
+     std::string temp_dir = std::string(ps5_data_dir()) + "/.tmp";
+@@ -713,7 +713,7 @@ std::string Extractor::Mkdtemp() {
+     return tmppath;
+ }
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+ #include <zip.h>
+ #include <sys/stat.h>
+ // PS5: the extractor's recipes can ship as one assets.zip beside eboot.bin (thousands of
+@@ -816,7 +816,7 @@ static std::string Ps5UnpackAssetsZip(const std::string& installPath, const std:
+ }
+ #endif
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+ #include "../../../torch/lib/TinySHA1.hpp"
+ 
+ static std::string Ps5Sha1Hex(const std::vector<uint8_t>& data) {
+@@ -918,7 +918,7 @@ bool Extractor::CallTorch(std::string installPath, std::string exportdir, std::a
+ 
+     std::string srcDir = std::filesystem::absolute(installPath).string() + "/assets";
+     exportdir = std::filesystem::absolute(exportdir).string();
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     {
+         auto t0 = std::chrono::steady_clock::now();
+         std::string unpacked = Ps5UnpackAssetsZip(std::filesystem::absolute(installPath).string(), exportdir,
+@@ -936,7 +936,7 @@ bool Extractor::CallTorch(std::string installPath, std::string exportdir, std::a
+     *totalExtract = SohTorch::CountAssetFiles(srcDir + "/" + GetTorchVersionDir());
+     *extractCount = 0;
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     const std::string romSha1 = Ps5Sha1Hex(mRomData);
+ #endif
+     // MQ debug dumps only hold 54MB of data, the rest is dump-specific padding, and some have
+@@ -947,12 +947,12 @@ bool Extractor::CallTorch(std::string installPath, std::string exportdir, std::a
+     }
+ 
+     // config.yml decides whether this is oot.o2r or oot-mq.o2r.
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     fprintf(stderr, "extractor: %s -> %s via %s (%zu asset files)\n", srcDir.c_str(), exportdir.c_str(), tempdir.c_str(), (size_t)*totalExtract);
+ #endif
+     auto tTorch = std::chrono::steady_clock::now();
+     std::string archiveName = SohTorch::Extract(std::move(mRomData), srcDir, tempdir, portVersion, extractCount);
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     fprintf(stderr, "extractor: torch returned '%s' perf torch %.1f s\n", archiveName.c_str(),
+             std::chrono::duration<double>(std::chrono::steady_clock::now() - tTorch).count());
+ #endif
+@@ -967,14 +967,14 @@ bool Extractor::CallTorch(std::string installPath, std::string exportdir, std::a
+             success = false;
+         }
+     }
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     if (success) {
+         Ps5WriteO2RStamp(exportdir + "/" + archiveName, std::filesystem::absolute(installPath).string(),
+                          mCurrentRomPath, romSha1);
+     }
+ #endif
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     fprintf(stderr, "extractor: perf copy+total %.1f s since torch start\n",
+             std::chrono::duration<double>(std::chrono::steady_clock::now() - tTorch).count());
+ #endif
+diff --git a/soh/soh/Extractor/Extract.h b/soh/soh/Extractor/Extract.h
+index 50000820..ff818b6e 100644
+--- a/soh/soh/Extractor/Extract.h
++++ b/soh/soh/Extractor/Extract.h
+@@ -63,7 +63,7 @@ class Extractor {
+     void SetSearchPath(const std::string& path);
+     void GetRoms(std::vector<std::string>& roms);
+     bool RunFileStandalone(std::string file);
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     // why the last RunFileStandalone call rejected its file (PS5 shows it on screen)
+     std::string mLastError;
+     // the ROM file RunFileStandalone accepted
+@@ -77,7 +77,7 @@ class Extractor {
+     std::string Mkdtemp();
+ };
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+ // PS5: provenance of an archive made from a ROM on the console. Beside <archive> (oot.o2r,
+ // oot-mq.o2r) the conversion writes <archive>.stamp naming this port, the SoH version, the
+ // ROM's SHA-1 and the archive's size. Ps5O2RStampMatches says whether the archive there now
+diff --git a/soh/soh/Extractor/TorchExtract.cpp b/soh/soh/Extractor/TorchExtract.cpp
+index 497af009..e2d59fb4 100644
+--- a/soh/soh/Extractor/TorchExtract.cpp
++++ b/soh/soh/Extractor/TorchExtract.cpp
+@@ -60,14 +60,14 @@ std::string Extract(std::vector<uint8_t> rom, const std::string& srcDir, const s
+         Companion::Instance = nullptr;
+     } catch (const std::exception& e) {
+         SPDLOG_ERROR("Torch extraction failed: {}", e.what());
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+         fprintf(stderr, "extractor: torch failed: %s\n", e.what());
+ #endif
+         Companion::Instance = nullptr;
+         return "";
+     } catch (...) {
+         SPDLOG_ERROR("Torch extraction failed with an unknown exception");
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+         fprintf(stderr, "extractor: torch failed (unknown exception)\n");
+ #endif
+         Companion::Instance = nullptr;
+@@ -79,7 +79,7 @@ std::string Extract(std::vector<uint8_t> rom, const std::string& srcDir, const s
+     std::error_code ec;
+     if (archiveName.empty() || !fs::exists(fs::path(destDir) / archiveName, ec)) {
+         SPDLOG_ERROR("Torch produced no archive in {}", destDir);
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+         fprintf(stderr, "extractor: torch produced no archive in %s (name '%s')\n", destDir.c_str(), archiveName.c_str());
+ #endif
+         return "";
+diff --git a/soh/soh/OTRGlobals.cpp b/soh/soh/OTRGlobals.cpp
+index 7e087454..0fb0b5d6 100644
+--- a/soh/soh/OTRGlobals.cpp
++++ b/soh/soh/OTRGlobals.cpp
+@@ -125,14 +125,14 @@
+ 
+ #ifdef __WIIU__
+ const uint32_t defaultImGuiScale = 3;
+-#elif defined(__PROSPERO__)
++#elif defined(__PROSPERO__) || defined(__PS4__)
+ // PlayStation 5: a 4K television across the room ("Large")
+ const uint32_t defaultImGuiScale = 2;
+ #else
+ const uint32_t defaultImGuiScale = 1;
+ #endif
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+ // PlayStation 5: the menu draws at 3840x2160, so every step is about 2.5x the desktop's;
+ // fonts are rasterised at PS5_FONT_RASTER times their size so they stay sharp when scaled
+ const float imguiScaleOptionToValue[4] = { 1.5f, 2.0f, 2.5f, 3.0f };
+@@ -284,7 +284,7 @@ typedef struct {
+ std::shared_ptr<Fast::Fast3dWindow> sohFast3dWindow;
+ static OTRVersion DetectOTRVersion(std::string path, bool isMq);
+ static bool VerifyArchiveVersion(OTRVersion version);
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+ OTRVersion ReadPortVersionFromOTR(std::string otrPath);
+ #endif
+ std::string portArchivePath = "";
+@@ -295,7 +295,7 @@ OTRGlobals::OTRGlobals() {
+ 
+     portArchivePath = Ship::Context::LocateFileAcrossAppDirs("soh.o2r");
+     OTRVersion portArchiveVersion = DetectOTRVersion("soh.o2r", false);
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     {
+         // PlayStation 5: soh.o2r ships with the game. A copy of another version in /data/soh
+         // (which is searched first) is moved aside when the installed one matches.
+@@ -365,7 +365,7 @@ OTRGlobals::OTRGlobals() {
+     }
+ 
+     previousImGuiScaleIndex = -1;
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     previousImGuiScale = 1.0f;
+     // PlayStation 5: the menu's console defaults, applied once (and to a config
+     // written by an earlier build): couch-sized, worked with the pad, and the game
+@@ -477,14 +477,21 @@ static bool RemoveArchiveAcrossAppDirs(const std::string& fileName) {
+     return !std::filesystem::exists(Ship::Context::LocateFileAcrossAppDirs(fileName, appShortName));
+ }
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+ // PlayStation 5: ROMs found in /data/soh/ that could not be used, with the reason, for the screen
+ static std::string gPS5RejectedRoms;
+ // the log level to restore after a ROM conversion (Torch changes spdlog's global level and pattern)
+ static spdlog::level::level_enum gPS5LogLevel = spdlog::level::info;
+ #endif
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
++// the data folder as the messages name it (the PS4 build keeps its own: PS4_DATA_DIR)
++#ifdef PS4_DATA_DIR
++#define PS5_DATA_TEXT PS4_DATA_DIR
++#else
++#define PS5_DATA_TEXT "/data/soh"
++#endif
++
+ // set when an archive without a matching provenance stamp was moved aside: convert the ROMs
+ // even though another archive (the other of vanilla / Master Quest) is still there
+ static bool gPS5RebuildArchives = false;
+@@ -566,7 +573,7 @@ static void Ps5CheckArchiveProvenance() {
+             std::ofstream(path + ".unverified", std::ios::trunc) << size << "\n";
+             std::string msg = std::string("Put your ") +
+                               (mq ? "Ocarina of Time Master Quest ROM" : "Ocarina of Time ROM") +
+-                              " in /data/soh to update the game files.\n\n"
++                              " in " PS5_DATA_TEXT " to update the game files.\n\n"
+                               "Until then the game uses the ones it has, which may be missing things.";
+             SohGui::RegisterPopup("Game files out of date", msg);
+         }
+@@ -575,7 +582,7 @@ static void Ps5CheckArchiveProvenance() {
+ #endif
+ 
+ void OTRGlobals::RunExtract(int argc, char* argv[]) {
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     // PlayStation 5: start the log file now, so the ROM checks below (a rejected file and why)
+     // reach /data/soh/logs/ even when the app then exits; Initialize() keeps this logger
+     {
+@@ -592,14 +599,14 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
+     auto wnd = std::dynamic_pointer_cast<Fast::Fast3dWindow>(OTRGlobals::Instance->context->GetWindow());
+     auto gui = wnd->GetGui();
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     Ps5CheckArchiveProvenance();
+ #endif
+     OTRVersion vanillaVersion = DetectOTRVersion("oot.o2r", false);
+     OTRVersion mqVersion = DetectOTRVersion("oot-mq.o2r", true);
+ 
+     bool shouldRegen = VerifyArchiveVersion(vanillaVersion) || VerifyArchiveVersion(mqVersion);
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     // PlayStation 5: Ps5CheckArchiveProvenance() already rebuilt or moved aside outdated archives;
+     // upstream's popups (delete and re-extract, or exit) never show here
+     shouldRegen = false;
+@@ -641,7 +648,7 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
+     OSFatal();
+ #endif
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     // PlayStation 5: the release ships the recipes as assets.zip, unpacked into /data/soh/assets
+     // when a ROM is converted (Extract.cpp), so a fresh install has no assets/ folder
+     const bool ps5HaveAssets = std::filesystem::exists(installPath + "/assets") ||
+@@ -700,7 +707,7 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
+                     msg = "Please extract the soh.o2r from the Ship of Harkinian download\nto your folder.\n\nPress "
+                           "and hold the power\n"
+                           "button to shutdown...";
+-#elif defined(__PROSPERO__)
++#elif defined(__PROSPERO__) || defined(__PS4__)
+                     msg = "This installation is incomplete or mixes two versions.\nReinstall Ship of Harkinian: copy "
+                           "the whole PPSA99320 folder\nfrom the release zip. Your saves are not affected.\n\nExiting...";
+ #else
+@@ -788,7 +795,7 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
+             case ES_EXTRACT_ARGS: {
+ #if !defined(__SWITCH__) && !defined(__WIIU__)
+                 if (args.empty()) {
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+                     // PlayStation 5: all ROMs processed: start the game if an archive exists
+                     // (an archive moved aside for a rebuild that did not happen goes back)
+                     for (const char* name : { "oot.o2r", "oot-mq.o2r" }) {
+@@ -832,7 +839,7 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
+                 if (extract.RunFileStandalone(file)) {
+                     bool doExtract = true;
+                     std::string archive = (extract.IsMasterQuest() ? "oot-mq.o2r" : "oot.o2r");
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+                     if (std::filesystem::exists(Ship::Context::GetAppDirectoryPath(appShortName) + "/" + archive)) {
+                         // a second ROM of a version already converted (or converted a moment ago)
+                         SPDLOG_WARN("PS5: ROM skipped: {} ({} already exists)", file, archive);
+@@ -859,7 +866,7 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
+                         });
+                     }
+                 } else {
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+                     // PlayStation 5: log it and list it on the "Game files needed" screen if
+                     // nothing usable was found, rather than one popup per file
+                     SPDLOG_WARN("PS5: ROM rejected: {} {}", file, extract.mLastError);
+@@ -884,12 +891,12 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
+                                 Ship::Context::LocateFileAcrossAppDirs("oot-mq.o2r", appShortName)) ||
+                             std::filesystem::exists(Ship::Context::LocateFileAcrossAppDirs("oot.o2r", appShortName));
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+                         if (!ootO2RExists || gPS5RebuildArchives) {
+ #else
+                         if (!ootO2RExists) {
+ #endif
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+                             // PlayStation 5: look for ROMs in the data folder straight away
+                             promptStep = PS_LOCAL;
+                             continue;
+@@ -911,7 +918,7 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
+                             extract.GetRoms(args);
+                         }
+                         if (!args.empty()) {
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+                             // PlayStation 5: convert every ROM found (vanilla and Master Quest) on the
+                             // console itself, with the progress on screen; no PC needed
+                             SPDLOG_INFO("PS5: {} ROM(s) found, extracting on the console", args.size());
+@@ -929,17 +936,17 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
+                         continue;
+                     }
+                     case PS_FIRST: {
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+                         // PlayStation 5: no file dialog. The ROM is found in the title's folder
+                         // (PS_LOCAL) or not at all.
+                         promptStep = PS_WAIT;
+                         {
+                             std::string msg = "This needs your own copy of Ocarina of Time.\n\n"
+                                               "Copy a supported ROM (.z64, .n64 or .v64; vanilla and/or\n"
+-                                              "Master Quest) to /data/soh/ on the console and start the\n"
++                                              "Master Quest) to " PS5_DATA_TEXT "/ on the console and start the\n"
+                                               "game again: it is converted on the console (a few minutes).";
+                             if (!gPS5RejectedRoms.empty()) {
+-                                msg += "\n\nFound in /data/soh/ but not usable:" + gPS5RejectedRoms;
++                                msg += "\n\nFound in " PS5_DATA_TEXT "/ but not usable:" + gPS5RejectedRoms;
+                             }
+                             SPDLOG_WARN("PS5: no usable ROM and no oot.o2r / oot-mq.o2r");
+                             spdlog::default_logger()->flush();
+@@ -1046,15 +1053,15 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
+                 }
+                 lastExtractFailed = extractFailed;
+                 if (extractFailed) {
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+                     // PlayStation 5: say where the log is, and list the ROM on the "Game files
+                     // needed" screen that follows when no archive could be made
+                     SPDLOG_ERROR("PS5: conversion failed: {}", file);
+                     gPS5RejectedRoms += "\n- " + std::filesystem::path(file).filename().string() +
+-                                        "\n   could not be converted (see /data/soh/logs/)";
++                                        "\n   could not be converted (see " PS5_DATA_TEXT "/logs/)";
+                     SohGui::RegisterPopup("Extraction Failed",
+                                           std::filesystem::path(file).filename().string() +
+-                                              " could not be converted.\nThe log is in /data/soh/logs/.",
++                                              " could not be converted.\nThe log is in " PS5_DATA_TEXT "/logs/.",
+                                           "OK", "");
+ #else
+                     SohGui::RegisterPopup("Extraction Failed",
+@@ -1063,7 +1070,7 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
+                     extractFailed = false;
+                 }
+                 extractionTask.reset();
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+                 Ship::Context::GetRawInstance()->GetLogger()->set_level(gPS5LogLevel);
+                 Ship::Context::GetRawInstance()->GetLogger()->set_pattern("[%H:%M:%S.%e] [%s:%#] [%^%l%$] %v");
+                 SPDLOG_INFO("PS5: conversion finished");
+@@ -1149,7 +1156,7 @@ void OTRGlobals::Initialize() {
+         static_cast<spdlog::level::level_enum>(CVarGetInteger(CVAR_DEVELOPER_TOOLS("LogLevel"), defaultLogLevel));
+     context->InitLogging(logLevel, logLevel);
+     Ship::Context::GetRawInstance()->GetLogger()->set_pattern("[%H:%M:%S.%e] [%s:%#] [%^%l%$] %v");
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     // PlayStation 5: the logger exists since RunExtract; a ROM conversion (Torch) sets spdlog's
+     // global level to warn, so put the configured level back or the session logs only warnings
+     Ship::Context::GetRawInstance()->GetLogger()->set_level(logLevel);
+@@ -1176,6 +1183,10 @@ void OTRGlobals::Initialize() {
+ 
+     SPDLOG_INFO("Starting Ship of Harkinian version {} (Branch: {} | Commit: {})", (char*)gBuildVersion,
+                 (char*)gGitBranch, (char*)gGitCommitHash);
++#ifdef __PS4__
++    // which build of the port a log comes from (the package version)
++    SPDLOG_INFO("PS4 port 01.06 (Vulkan, indexed batches, stall-aware pacing)");
++#endif
+ 
+     auto loader = context->GetResourceManager()->GetResourceLoader();
+     loader->RegisterResourceFactory(std::make_shared<Fast::ResourceFactoryBinaryTextureV0>(), RESOURCE_FORMAT_BINARY,
+@@ -1841,10 +1852,11 @@ static void SetAppImageHome() {
+ }
+ #endif
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+ bool Ps5ShaderWarmupAvailable();
+ std::string Ps5ShaderWarmupSalt();
+ void Ps5ShaderWarmup(const std::vector<std::pair<uint64_t, uint64_t>>& keys, std::atomic<size_t>* done);
++void Ps5ShaderCompilerWarmup();
+ extern "C" const char* ps5_data_dir(void);
+ 
+ static void Ps5ReadShaderKeys(const std::string& path, std::set<std::pair<uint64_t, uint64_t>>& keys) {
+@@ -1861,6 +1873,9 @@ static void Ps5ReadShaderKeys(const std::string& path, std::set<std::pair<uint64
+ // runtime. A stamp records what was warmed.
+ static void Ps5ShaderWarmupScreen() {
+     if (!Ps5ShaderWarmupAvailable()) return;
++    // every session, on a worker: glslang's first compile builds its tables (~400 ms), and with the cache below
++    // already warm that first compile was a new combiner in the middle of the game (gfx_vulkan.cpp)
++    Ps5ShaderCompilerWarmup();
+     std::set<std::pair<uint64_t, uint64_t>> keySet;
+     Ps5ReadShaderKeys(std::filesystem::absolute(Ship::Context::GetAppBundlePath()).string() + "/shader_keys.txt",
+                       keySet);
+@@ -1945,7 +1960,7 @@ extern "C" void InitOTR(int argc, char* argv[]) {
+     OTRGlobals::Instance->RunExtract(argc, argv);
+ 
+     OTRGlobals::Instance->Initialize();
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     Ps5ShaderWarmupScreen();
+ #endif
+     CustomMessageManager::Instance = new CustomMessageManager();
+@@ -2083,7 +2098,7 @@ extern "C" uint64_t GetUnixTimestamp() {
+     return (uint64_t)millis.count();
+ }
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+ #include "ship/controller/controldevice/controller/mapping/sdl/SDLButtonToButtonMapping.h"
+ // PlayStation 5, menu defaults version 4: the right stick is the camera (SoH's Free
+ // Look, and aiming in first person) and the C buttons move to the D-pad, which the
+@@ -2170,7 +2185,7 @@ static void Ps5ApplyWidescreenDefaults() {
+ #endif
+ 
+ extern "C" void Graph_StartFrame() {
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     Ps5ApplyCameraDefaults();
+ #endif
+     auto gui = std::dynamic_pointer_cast<Fast::Fast3dGui>(Ship::Context::GetRawInstance()->GetWindow()->GetGui());
+@@ -2299,6 +2314,112 @@ void RunCommands(Gfx* Commands, int time, int step, int denom, int count) {
+     ImGui::PopStyleColor();
+ }
+ 
++#ifdef __PS4__
++#include <SDL_timer.h>
++#include "ship/utils/Ps4Stalls.h"
++// libultraship's Vulkan renderer (gfx_vulkan.cpp): display-list interpreter milliseconds, summed over frames
++extern double ps5_t_interp;
++namespace {
++// PS4: every game tick (20 a second) renders all of its interpolated frames, so a frame rate the CPU cannot
++// hold (Djipi's 3DS Hyrule Field: 35 to 50 ms of display-list work a frame against 16.7 ms at 60 FPS) slows
++// the whole game down, and the sound with it (it is made one tick at a time). Instead the frame rate steps
++// down (and back up) to what the CPU can draw at full game speed, from the measured cost of a tick's game
++// logic and of one frame: the target, then 60, 50, 40 and 30, and the game's own 20 at worst. Settings key
++// gSettings.PS4.KeepGameSpeed (on by default, "Keep Game Speed" in the menu).
++//
++// 01.05: the costs it decides from leave out one-off work (ship/utils/Ps4Stalls.h: a mod's models and textures
++// loaded the first time they are drawn, shaders compiled, a scene loaded), go through a median of three ticks (one
++// slow tick moves nothing) and count at most twice the average. Before, one such slow tick (200 ms riding into new
++// ground, 2 s entering a place) inflated the averages: the rate fell to 30 or 20 and climbed back a step a second,
++// several seconds of it after every hitch.
++struct Ps4Cost {
++    double average;
++    double recent[3] = {};
++    unsigned count = 0;
++
++    void Add(double sample, double rate) {
++        sample = std::max(sample, 0.0);
++        recent[count++ % 3] = sample;
++        double value = sample;
++        if (count >= 3) {
++            const double a = recent[0], b = recent[1], c = recent[2];
++            value = std::max(std::min(a, b), std::min(std::max(a, b), c)); // the median
++        }
++        // a cost that really went up still pulls the average there in a few ticks (x1.2 a tick at most)
++        average += (std::min(value, average * 2.0 + 1.0) - average) * rate;
++    }
++};
++
++struct Ps4FramePacing {
++    Ps4Cost logic{ 3.0 }; // one tick's game logic (between two calls), one-off work left out
++    Ps4Cost frame{ 8.0 }; // one frame's display-list work, one-off work left out
++    double lastReturnMs = 0;
++    double lastReturnStallMs = 0;
++    double lastReportMs = 0;
++    int fps = 0;           // the rate chosen now (0: none yet)
++    int upTicks = 0;       // ticks in a row a higher rate would have fit
++    int downTicks = 0;     // ticks in a row the rate did not fit
++    unsigned ticks = 0, framesDrawn = 0, lowered = 0, raised = 0;
++    // this report's hitches (ticks over 100 ms) and one-off work
++    unsigned hitches = 0;
++    double worstTickMs = 0;
++    Ps4Stalls stalls{};
++} gPs4Pacing;
++
++double Ps4NowMs() {
++    return (double)SDL_GetPerformanceCounter() * 1000.0 / (double)SDL_GetPerformanceFrequency();
++}
++
++int Ps4ChooseFps(int target, int original) {
++    // frames a second the CPU can draw at full speed: the second less `original` ticks of game logic, over one
++    // frame's display-list work and the rest of a frame (~1.5 ms: ImGui, command submission, the flip)
++    const double capacity = (1000.0 - original * gPs4Pacing.logic.average) / (gPs4Pacing.frame.average + 1.5);
++    const int current = gPs4Pacing.fps > 0 ? std::min(gPs4Pacing.fps, target) : target;
++    static const int kSteps[] = { 60, 50, 40, 30 };
++    int desired = original;
++    for (int i = -1; i < (int)(sizeof(kSteps) / sizeof(kSteps[0])); i++) {
++        const int candidate = i < 0 ? target : kSteps[i];
++        if (candidate <= original || (i >= 0 && candidate >= target)) {
++            continue;
++        }
++        // staying (or stepping down to it) tolerates 8% over: the game a little slow rather than the rate
++        // flickering; stepping up wants 5% to spare
++        const double fit = candidate <= current ? capacity * 1.08 : capacity * 0.95;
++        if (candidate <= fit) {
++            desired = candidate;
++            break;
++        }
++    }
++    if (desired < current) {
++        // down when two ticks in a row say so (a tenth of a second): not for one slow tick
++        gPs4Pacing.upTicks = 0;
++        if (++gPs4Pacing.downTicks >= 2) {
++            gPs4Pacing.fps = desired;
++            gPs4Pacing.downTicks = 0;
++            gPs4Pacing.lowered++;
++        } else {
++            gPs4Pacing.fps = current;
++        }
++    } else if (desired > current) {
++        // up after half a second of headroom (it was a second a step), straight to the rate that fits
++        gPs4Pacing.downTicks = 0;
++        if (++gPs4Pacing.upTicks >= 10) {
++            gPs4Pacing.fps = desired;
++            gPs4Pacing.upTicks = 0;
++            gPs4Pacing.raised++;
++        } else {
++            gPs4Pacing.fps = current;
++        }
++    } else {
++        gPs4Pacing.fps = current;
++        gPs4Pacing.upTicks = 0;
++        gPs4Pacing.downTicks = 0;
++    }
++    return gPs4Pacing.fps;
++}
++} // namespace
++#endif
++
+ // C->C++ Bridge
+ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
+     {
+@@ -2319,6 +2440,26 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
+         fps = original_fps;
+     }
+ 
++#ifdef __PS4__
++    const double ps4Start = Ps4NowMs();
++    double ps4LogicRaw = 0;
++    if (gPs4Pacing.lastReturnMs > 0) {
++        ps4LogicRaw = ps4Start - gPs4Pacing.lastReturnMs;
++        // the game logic less the one-off work done in it; a scene load (well over half a second) not at all
++        const double logic = ps4LogicRaw - (gPs4Stalls.ms - gPs4Pacing.lastReturnStallMs);
++        if (ps4LogicRaw > 0 && ps4LogicRaw < 500) {
++            gPs4Pacing.logic.Add(logic, 0.1);
++        }
++    }
++    if (CVarGetInteger(CVAR_SETTING("PS4.KeepGameSpeed"), 1) && !GfxDebuggerIsDebugging() && fps > original_fps) {
++        fps = Ps4ChooseFps(fps, original_fps); // the frame times below follow it (evenly spaced)
++    } else {
++        gPs4Pacing.fps = fps;
++        gPs4Pacing.upTicks = 0;
++        gPs4Pacing.downTicks = 0;
++    }
++#endif
++
+     if (last_fps != fps || last_update_rate != R_UPDATE_RATE) {
+         time = 0;
+     }
+@@ -2347,7 +2488,49 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
+         count = 1;
+     }
+ 
++#ifdef __PS4__
++    const double ps4InterpBefore = ps5_t_interp;
++    const Ps4Stalls ps4StallsBefore = gPs4Stalls;
++    const double ps4RenderStart = Ps4NowMs();
++#endif
+     RunCommands(commands, start_time, step, next_original_frame, count);
++#ifdef __PS4__
++    {
++        // the renderer's perf report zeroes the sum every 10 s: a tick that saw it is skipped
++        const double spent = ps5_t_interp - ps4InterpBefore;
++        const double stalled = gPs4Stalls.ms - ps4StallsBefore.ms;
++        if (spent > 0 && count > 0) {
++            gPs4Pacing.frame.Add((spent - stalled) / count, 0.2);
++        }
++        gPs4Pacing.ticks++;
++        gPs4Pacing.framesDrawn += count;
++        // a hitch: this tick's game logic and frames together over 100 ms; the report says what one-off work
++        // there was (in the whole report period)
++        const double tickMs = ps4LogicRaw + (Ps4NowMs() - ps4RenderStart);
++        if (tickMs > 100.0) {
++            gPs4Pacing.hitches++;
++            gPs4Pacing.worstTickMs = std::max(gPs4Pacing.worstTickMs, tickMs);
++        }
++        if (ps4Start - gPs4Pacing.lastReportMs >= 10000.0) {
++            if (gPs4Pacing.lastReportMs > 0) {
++                const Ps4Stalls& was = gPs4Pacing.stalls;
++                SPDLOG_INFO("PS4 pacing: {} ticks, {:.1f} frames a tick, {} FPS of {} (lowered {}x, raised {}x); logic "
++                            "{:.1f} ms, frame {:.1f} ms; hitches {} (worst {:.0f} ms); one-off {:.0f} ms: {} "
++                            "resources, {} textures, {} shaders",
++                            gPs4Pacing.ticks, gPs4Pacing.ticks ? (double)gPs4Pacing.framesDrawn / gPs4Pacing.ticks : 0.0,
++                            fps, target_fps, gPs4Pacing.lowered, gPs4Pacing.raised, gPs4Pacing.logic.average,
++                            gPs4Pacing.frame.average, gPs4Pacing.hitches, gPs4Pacing.worstTickMs, gPs4Stalls.ms - was.ms,
++                            gPs4Stalls.resources - was.resources, gPs4Stalls.textures - was.textures,
++                            gPs4Stalls.shaders - was.shaders);
++            }
++            gPs4Pacing.lastReportMs = ps4Start;
++            gPs4Pacing.ticks = gPs4Pacing.framesDrawn = gPs4Pacing.lowered = gPs4Pacing.raised = 0;
++            gPs4Pacing.hitches = 0;
++            gPs4Pacing.worstTickMs = 0;
++            gPs4Pacing.stalls = gPs4Stalls;
++        }
++    }
++#endif
+ 
+     last_fps = fps;
+     last_update_rate = R_UPDATE_RATE;
+@@ -2358,6 +2541,10 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
+             audio.cv_from_thread.wait(Lock);
+         }
+     }
++#ifdef __PS4__
++    gPs4Pacing.lastReturnMs = Ps4NowMs();
++    gPs4Pacing.lastReturnStallMs = gPs4Stalls.ms;
++#endif
+ 
+     bool curAltAssets = CVarGetInteger(CVAR_SETTING("AltAssets"), 1);
+     if (prevAltAssets != curAltAssets) {
+diff --git a/soh/soh/ResourceManagerHelpers.cpp b/soh/soh/ResourceManagerHelpers.cpp
+index 34923ba5..fa849b78 100644
+--- a/soh/soh/ResourceManagerHelpers.cpp
++++ b/soh/soh/ResourceManagerHelpers.cpp
+@@ -1,4 +1,6 @@
+ #include <unordered_set>
++#include <cstring>
++#include <string_view>
+ #include <spdlog/spdlog.h>
+ #include <libultraship/bridge/consolevariablebridge.h>
+ #include <fast/interpreter.h>
+@@ -240,24 +242,29 @@ extern "C" char** ResourceMgr_ListFiles(const char* searchMask, int* resultSize)
+     return result;
+ }
+ 
++// One string for the lookup (they built three to five: the copy, each substr, the "alt/" concatenation). With alt
++// assets on, every display list the game draws by name asks ResourceMgr_FileAltExists first.
+ extern "C" uint8_t ResourceMgr_FileExists(const char* filePath) {
+-    std::string path = filePath;
+-    if (path.substr(0, 7) == "__OTR__") {
+-        path = path.substr(7);
++    std::string_view view(filePath);
++    if (view.starts_with("__OTR__")) {
++        view.remove_prefix(7);
+     }
+ 
+-    return ExtensionCache.contains(path);
++    return ExtensionCache.contains(std::string(view));
+ }
+ 
+ extern "C" uint8_t ResourceMgr_FileAltExists(const char* filePath) {
+-    std::string path = filePath;
+-    if (path.substr(0, 7) == "__OTR__") {
+-        path = path.substr(7);
++    std::string_view view(filePath);
++    if (view.starts_with("__OTR__")) {
++        view.remove_prefix(7);
+     }
+ 
+-    if (path.substr(0, 4) != "alt/") {
+-        path = "alt/" + path;
++    std::string path;
++    if (!view.starts_with("alt/")) {
++        path.reserve(view.size() + 4);
++        path = "alt/";
+     }
++    path += view;
+ 
+     return ExtensionCache.contains(path);
+ }
+@@ -275,14 +282,15 @@ extern "C" void ResourceMgr_UnloadOriginalWhenAltExists(const char* resName) {
+ }
+ 
+ std::shared_ptr<Ship::IResource> ResourceMgr_GetResourceByNameHandlingMQ(const char* path) {
+-    std::string Path = path;
+     if (ResourceMgr_IsGameMasterQuest()) {
+-        size_t pos = 0;
+-        if ((pos = Path.find("/nonmq/", 0)) != std::string::npos) {
+-            Path.replace(pos, 7, "/mq/");
++        if (const char* nonmq = strstr(path, "/nonmq/")) {
++            std::string Path = path;
++            Path.replace(nonmq - path, 7, "/mq/");
++            return Ship::Context::GetRawInstance()->GetResourceManager()->LoadResource(Path);
+         }
+     }
+-    return Ship::Context::GetRawInstance()->GetResourceManager()->LoadResource(Path.c_str());
++    // the name as it is (it was copied twice: here, then into LoadResource's own string)
++    return Ship::Context::GetRawInstance()->GetResourceManager()->LoadResource(path);
+ }
+ 
+ extern "C" char* ResourceMgr_GetResourceDataByNameHandlingMQ(const char* path) {
+@@ -604,7 +612,7 @@ extern "C" int ResourceMgr_OTRSigCheck(char* imgData) {
+ // Load animation with explicit alt asset path checking.
+ // When Alt Assets is OFF: use original path directly (O2R or vanilla)
+ // When Alt Assets is ON: try alt/ prefix first, fall back to regular path if not found or invalid
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+ static AnimationHeaderCommon* ResourceMgr_LoadAnimByNameImpl(const char* path);
+ 
+ // PlayStation 5: an animation that is missing from (or failed to load out of) the
+diff --git a/soh/soh/SohGui/Menu.cpp b/soh/soh/SohGui/Menu.cpp
+index 1b7bab1a..9b6f1b6a 100644
+--- a/soh/soh/SohGui/Menu.cpp
++++ b/soh/soh/SohGui/Menu.cpp
+@@ -6,7 +6,7 @@
+ #include <ship/Context.h>
+ 
+ #include "Menu.h"
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+ // pad nav: let focus move between the header, sidebar and content child windows
+ #define MENU_NAVFLAT ImGuiChildFlags_NavFlattened
+ #else
+@@ -655,7 +655,7 @@ void Menu::DrawElement() {
+ 
+     ImGui::PopStyleColor();
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     // PlayStation 5: the pad is the only input, and ImGui navigates only a focused
+     // window: keep the menu focused (unless one of its popups is up) with the
+     // navigation cursor shown
+@@ -689,9 +689,12 @@ void Menu::DrawElement() {
+     ImGui::PushFont(OTRGlobals::Instance->fontStandardLargest);
+     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 8.0f));
+     std::string headerIndex = CVarGetString(headerCvar, "Settings");
+-#ifdef __PROSPERO__
+-    // pad nav cannot leave a child window for the header row: L1/R1 cycle the top tabs
+-    if (!menuOrder.empty() && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) {
++#if defined(__PROSPERO__) || defined(__PS4__)
++    // pad nav cannot leave a child window for the header row: L1/R1 cycle the top tabs. Not while a
++    // popup is up: the controller mapping's "Press any button" popup counts as part of this window, and
++    // L1/R1 there are the buttons being mapped (the page used to change under it, losing the mapping)
++    if (!menuOrder.empty() && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
++        !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel)) {
+         int dir = ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) - ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false);
+         if (dir != 0) {
+             int n = (int)menuOrder.size();
+@@ -881,9 +884,10 @@ void Menu::DrawElement() {
+     if (!sidebar->contains(sectionIndex)) {
+         sectionIndex = menuEntries.at(headerIndex).sidebarOrder.at(0);
+     }
+-#ifdef __PROSPERO__
+-    // L2/R2 cycle the sidebar entries of the current tab
+-    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) {
++#if defined(__PROSPERO__) || defined(__PS4__)
++    // L2/R2 cycle the sidebar entries of the current tab (not while a popup is up, as above)
++    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
++        !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel)) {
+         auto& order = menuEntries.at(headerIndex).sidebarOrder;
+         int dir = ImGui::IsKeyPressed(ImGuiKey_GamepadR2, false) - ImGui::IsKeyPressed(ImGuiKey_GamepadL2, false);
+         if (dir != 0 && !order.empty()) {
+diff --git a/soh/soh/SohGui/SohMenuSettings.cpp b/soh/soh/SohGui/SohMenuSettings.cpp
+index 4b45960b..7caf30ea 100644
+--- a/soh/soh/SohGui/SohMenuSettings.cpp
++++ b/soh/soh/SohGui/SohMenuSettings.cpp
+@@ -139,7 +139,7 @@ void SohMenu::AddMenuSettings() {
+                      .ComboMap(menuThemeOptions)
+                      .DefaultIndex(Colors::LightBlue));
+ #if not defined(__SWITCH__) and not defined(__WIIU__)
+-#ifndef __PROSPERO__ // PlayStation 5: not for a console
++#if !defined(__PROSPERO__) && !defined(__PS4__) // PlayStation 5: not for a console
+     AddWidget(path, "Menu Controller Navigation", WIDGET_CVAR_CHECKBOX)
+         .CVar(CVAR_IMGUI_CONTROLLER_NAV)
+         .RaceDisable(false)
+@@ -166,7 +166,7 @@ void SohMenu::AddMenuSettings() {
+             "Sets the opacity of the background of the port menu."));
+ 
+     AddWidget(path, "General Settings", WIDGET_SEPARATOR_TEXT);
+-#ifndef __PROSPERO__ // PlayStation 5: not for a console
++#if !defined(__PROSPERO__) && !defined(__PS4__) // PlayStation 5: not for a console
+     AddWidget(path, "Cursor Always Visible", WIDGET_CVAR_CHECKBOX)
+         .CVar(CVAR_SETTING("CursorVisibility"))
+         .RaceDisable(false)
+@@ -177,7 +177,7 @@ void SohMenu::AddMenuSettings() {
+         .Options(CheckboxOptions().Tooltip("Makes the cursor always visible, even in full screen."));
+ #endif
+ #endif
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     AddWidget(path, "PlayStation Button Prompts", WIDGET_CVAR_CHECKBOX)
+         .CVar(CVAR_SETTING("PS5.Prompts"))
+         .RaceDisable(false)
+@@ -185,6 +185,24 @@ void SohMenu::AddMenuSettings() {
+                      .DefaultValue(true)
+                      .Tooltip("Shows Cross, Circle, L1/L2/R2 and the D-pad in place of the N64 buttons in "
+                               "text, the pause menu and the HUD. Takes effect the next time the game starts."));
++#endif
++#ifdef __PS4__
++    AddWidget(path, "Keep Game Speed", WIDGET_CVAR_CHECKBOX)
++        .CVar(CVAR_SETTING("PS4.KeepGameSpeed"))
++        .RaceDisable(false)
++        .Options(CheckboxOptions()
++                     .DefaultValue(true)
++                     .Tooltip("When the console cannot draw every frame of the chosen frame rate (heavy texture "
++                              "and model packs), it draws fewer of them, so the game and its sound keep their "
++                              "normal speed. Off: every frame is drawn and the game slows down instead."));
++    AddWidget(path, "Skip Off-screen Geometry (experimental)", WIDGET_CVAR_CHECKBOX)
++        .CVar(CVAR_SETTING("PS4.CullDL"))
++        .RaceDisable(false)
++        .Options(CheckboxOptions()
++                     .DefaultValue(false)
++                     .Tooltip("Skips models whose bounding box is entirely off screen, as the N64 does (the PC "
++                              "version draws them anyway). Saves CPU with large texture/model packs; if part of a "
++                              "model disappears or flickers, turn it off."));
+ #endif
+     AddWidget(path, "Search In Sidebar", WIDGET_CVAR_CHECKBOX)
+         .CVar(CVAR_SETTING("Menu.SidebarSearch"))
+@@ -206,7 +224,7 @@ void SohMenu::AddMenuSettings() {
+     AddWidget(path, "Reset Button Combination:", WIDGET_CVAR_BTN_SELECTOR)
+         .CVar("gSettings.ResetBtn")
+         .Options(BtnSelectorOptions().DefaultValue(BTN_CUSTOM_MODIFIER2));
+-#ifndef __PROSPERO__ // PlayStation 5: not for a console
++#if !defined(__PROSPERO__) && !defined(__PS4__) // PlayStation 5: not for a console
+     AddWidget(path, "Open App Files Folder", WIDGET_BUTTON)
+         .RaceDisable(false)
+         .Callback([](WidgetInfo& info) {
+@@ -278,7 +296,7 @@ void SohMenu::AddMenuSettings() {
+         .Options(ComboboxOptions()
+                      .ComboMap(imguiScaleOptions)
+                      .Tooltip("Changes the scaling of the ImGui menu elements.")
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+                      .DefaultIndex(2)
+ #else
+                      .DefaultIndex(1)
+@@ -353,7 +371,7 @@ void SohMenu::AddMenuSettings() {
+     path.sidebarName = "Graphics";
+     AddSidebarEntry("Settings", "Graphics", 3);
+     AddWidget(path, "Graphics Options", WIDGET_SEPARATOR_TEXT);
+-#ifndef __PROSPERO__ // PlayStation 5: always full screen
++#if !defined(__PROSPERO__) && !defined(__PS4__) // PlayStation 5: always full screen
+     AddWidget(path, "Toggle Fullscreen", WIDGET_BUTTON)
+         .RaceDisable(false)
+         .Callback([](WidgetInfo& info) { Ship::Context::GetRawInstance()->GetWindow()->ToggleFullscreen(); })
+@@ -422,7 +440,7 @@ void SohMenu::AddMenuSettings() {
+         .CVar(CVAR_SETTING("MatchRefreshRate"))
+         .RaceDisable(false)
+         .Options(CheckboxOptions().Tooltip("Matches interpolation value to the refresh rate of your display."));
+-#ifndef __PROSPERO__ // PlayStation 5: Vulkan only, and the swapchain always waits for vsync
++#if !defined(__PROSPERO__) && !defined(__PS4__) // PlayStation 5: Vulkan only, and the swapchain always waits for vsync
+     AddWidget(path, "Renderer API (Needs reload)", WIDGET_VIDEO_BACKEND).RaceDisable(false);
+     AddWidget(path, "Enable Vsync", WIDGET_CVAR_CHECKBOX)
+         .CVar(CVAR_VSYNC_ENABLED)
+@@ -432,7 +450,7 @@ void SohMenu::AddMenuSettings() {
+                      .Tooltip("Removes tearing, but clamps your max FPS to your display's refresh rate.")
+                      .DefaultValue(true));
+ #endif
+-#ifndef __PROSPERO__ // PlayStation 5: always full screen
++#if !defined(__PROSPERO__) && !defined(__PS4__) // PlayStation 5: always full screen
+     AddWidget(path, "Windowed Fullscreen", WIDGET_CVAR_CHECKBOX)
+         .CVar(CVAR_SDL_WINDOWED_FULLSCREEN)
+         .RaceDisable(false)
+@@ -441,7 +459,7 @@ void SohMenu::AddMenuSettings() {
+         })
+         .Options(CheckboxOptions().Tooltip("Enables Windowed Fullscreen Mode."));
+ #endif
+-#ifndef __PROSPERO__ // PlayStation 5: one screen, no OS windows
++#if !defined(__PROSPERO__) && !defined(__PS4__) // PlayStation 5: one screen, no OS windows
+     AddWidget(path, "Allow multi-windows", WIDGET_CVAR_CHECKBOX)
+         .CVar(CVAR_ENABLE_MULTI_VIEWPORTS)
+         .RaceDisable(false)
+diff --git a/soh/soh/SohGui/SohModals.cpp b/soh/soh/SohGui/SohModals.cpp
+index 3609d953..a9a68d84 100644
+--- a/soh/soh/SohGui/SohModals.cpp
++++ b/soh/soh/SohGui/SohModals.cpp
+@@ -47,7 +47,7 @@ void SohModalWindow::DrawElement() {
+             ImGui::Text("%s", curModal.message_.c_str());
+             UIWidgets::PushStyleButton(THEME_COLOR);
+             bool pressed1 = ImGui::Button(curModal.button1_.c_str());
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+             // PlayStation 5: Cross answers with the first button until the pad has moved focus
+             // (the popup often opens before pad navigation, so nothing would be focused yet)
+             if (!ImGui::IsAnyItemFocused() && ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown, false)) {
+diff --git a/soh/soh/frame_interpolation.cpp b/soh/soh/frame_interpolation.cpp
+index 038664c8..6e968b2e 100644
+--- a/soh/soh/frame_interpolation.cpp
++++ b/soh/soh/frame_interpolation.cpp
+@@ -108,7 +108,7 @@ typedef pair<const void*, int> label;
+ union Data {
+     Data() {
+     }
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     // PlayStation 5 (from PS5_Ghostship): plain data, so a vector of these can grow under the SDK's libc++
+     Data(const Data& other) {
+         memcpy(static_cast<void*>(this), &other, sizeof(Data));
+@@ -452,11 +452,17 @@ struct InterpolateCtx {
+ } // anonymous namespace
+ 
+ unordered_map<Mtx*, MtxF> FrameInterpolation_Interpolate(float step) {
++    // Every interpolated frame builds this map (an entry per matrix the frame interpolates, a thousand and more
++    // in Hyrule Field): sized from the last one up front instead of rehashed on the way, and moved out instead of
++    // copied (the copy allocated every entry a second time).
++    static size_t sLastSize = 0;
+     InterpolateCtx ctx;
++    ctx.mtx_replacements.reserve(sLastSize);
+     ctx.step = step;
+     ctx.w = 1.0f - step;
+     ctx.interpolate_branch(&previous_recording.root_path, &current_recording.root_path);
+-    return ctx.mtx_replacements;
++    sLastSize = ctx.mtx_replacements.size();
++    return std::move(ctx.mtx_replacements);
+ }
+ 
+ void FrameInterpolation_StartRecord(void) {
+diff --git a/soh/src/buffers/heaps.c b/soh/src/buffers/heaps.c
+index 93e4584e..135e6067 100644
+--- a/soh/src/buffers/heaps.c
++++ b/soh/src/buffers/heaps.c
+@@ -1,6 +1,6 @@
+ #include "z64.h"
+ #include <assert.h>
+-#if !defined(__APPLE__) && !defined(__OpenBSD__) && !defined(__PROSPERO__)
++#if !defined(__APPLE__) && !defined(__OpenBSD__) && !defined(__PROSPERO__) && !defined(__PS4__)
+ #include <malloc.h>
+ #endif
+ #include <stdlib.h>
+diff --git a/soh/src/code/main.c b/soh/src/code/main.c
+index 4e68d5da..e5a372b1 100644
+--- a/soh/src/code/main.c
++++ b/soh/src/code/main.c
+@@ -57,6 +57,10 @@ int SDL_main(int argc, char* argv[]) {
+     // Keep '.' as the decimal point, user locale may use ','
+     setlocale(LC_NUMERIC, "C");
+ 
++#elif defined(__PS4__)
++// PS4: the process entry is the port's (port/ps4_platform.cpp), which runs this on a thread with a 32 MiB
++// stack (the PS4's main thread has a small one, and the renderer's shader compiler recurses deeply)
++int app_main(int argc, char* argv[]) {
+ #else //_WIN32
+ int main(int argc, char* argv[]) {
+ #endif

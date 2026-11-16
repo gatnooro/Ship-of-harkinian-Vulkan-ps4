@@ -1,0 +1,3146 @@
+diff --git a/cmake/dependencies/common.cmake b/cmake/dependencies/common.cmake
+index 60c7841..ead5df8 100644
+--- a/cmake/dependencies/common.cmake
++++ b/cmake/dependencies/common.cmake
+@@ -104,7 +104,7 @@ endif()
+ 
+ #=================== STB ===================
+ set(STB_DIR ${CMAKE_BINARY_DIR}/_deps/stb)
+-set(stb_url "https://github.com/nothings/stb/raw/0bc88af4de5fb022db643c2d8e549a0927749354/stb_image.h")
++set(stb_url "https://raw.githubusercontent.com/nothings/stb/0bc88af4de5fb022db643c2d8e549a0927749354/stb_image.h")
+ set(stb_expected_hash c54b15a689e6a1f32c75e2ec23afa442e3e0e37e894b73c1974d08679b20dd5c)
+ 
+ # file(DOWNLOAD) does not report error pages or truncated bodies, so verify the hash and retry.
+diff --git a/include/fast/backends/gfx_rendering_api.h b/include/fast/backends/gfx_rendering_api.h
+index dee9af4..09b1659 100644
+--- a/include/fast/backends/gfx_rendering_api.h
++++ b/include/fast/backends/gfx_rendering_api.h
+@@ -5,6 +5,7 @@
+ 
+ #include <unordered_map>
+ #include <set>
++#include <vector>
+ #include "imconfig.h"
+ 
+ namespace Fast {
+@@ -116,6 +117,18 @@ class GfxRenderingAPI {
+     virtual void SetScissor(int x, int y, int width, int height) = 0;
+     virtual void SetUseAlpha(bool useAlpha) = 0;
+     virtual void DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris) = 0;
++    // Indexed batch: buf_vbo_len floats of vertices, floats_per_vertex each, and num_indices 16-bit indices (three
++    // a triangle) into them. Backends without an indexed path get the triangles expanded into DrawTriangles.
++    virtual void DrawIndexedTriangles(float buf_vbo[], size_t buf_vbo_len, size_t floats_per_vertex,
++                                      const uint16_t* indices, size_t num_indices) {
++        static std::vector<float> expanded;
++        expanded.resize(num_indices * floats_per_vertex);
++        for (size_t i = 0; i < num_indices; i++) {
++            memcpy(&expanded[i * floats_per_vertex], &buf_vbo[indices[i] * floats_per_vertex],
++                   floats_per_vertex * sizeof(float));
++        }
++        DrawTriangles(expanded.data(), expanded.size(), num_indices / 3);
++    }
+     virtual void Init() = 0;
+     virtual void OnResize() = 0;
+     virtual void StartFrame() = 0;
+diff --git a/include/fast/backends/gfx_vulkan.h b/include/fast/backends/gfx_vulkan.h
+index 7423510..e6169de 100644
+--- a/include/fast/backends/gfx_vulkan.h
++++ b/include/fast/backends/gfx_vulkan.h
+@@ -14,7 +14,7 @@
+ #include "gfx_rendering_api.h"
+ #include "../interpreter.h"
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+ #include <volk.h> // the Vulkan commands are volk's pointers: there is no loader to link
+ #else
+ #include <vulkan/vulkan.h>
+@@ -132,6 +132,8 @@ struct FramebufferVK {
+ 
+     ShaderProgramVK* mLastShaderProgram = nullptr;
+     VkPipeline mLastPipeline = VK_NULL_HANDLE;
++    // The vertex ring bound at offset 0 as both vertex and index buffer (indexed batches draw at offsets into it)
++    VkBuffer mBoundRing = VK_NULL_HANDLE;
+     VkImageView mLastBoundViews[SHADER_MAX_TEXTURES] = {};
+     VkSampler mLastBoundSamplers[SHADER_MAX_TEXTURES] = {};
+     uint32_t mLastSet0Offsets[4] = { UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX };
+@@ -148,7 +150,7 @@ struct FramebufferVK {
+ class GfxRenderingAPIVK final : public GfxRenderingAPI {
+   public:
+     ~GfxRenderingAPIVK() override = default;
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     // PS5 shader warm-up: GLSL -> SPIR-V for the listed combiner keys into the disk cache
+     // (no Vulkan objects; safe on a worker thread). Salt = what else the GLSL depends on.
+     void Ps5PrecompileShaders(const std::vector<std::pair<uint64_t, uint64_t>>& keys, std::atomic<size_t>* done);
+@@ -178,6 +180,8 @@ class GfxRenderingAPIVK final : public GfxRenderingAPI {
+     void SetScissor(int x, int y, int width, int height) override;
+     void SetUseAlpha(bool useAlpha) override;
+     void DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris) override;
++    void DrawIndexedTriangles(float buf_vbo[], size_t buf_vbo_len, size_t floats_per_vertex, const uint16_t* indices,
++                              size_t num_indices) override;
+     void Init() override;
+     void OnResize() override;
+     void StartFrame() override;
+@@ -272,6 +276,10 @@ class GfxRenderingAPIVK final : public GfxRenderingAPI {
+                              uint8_t** mapped);
+     bool GrowVertexRing(FrameSlot& slot, size_t needed);
+     bool GrowUniformRing(FrameSlot& slot, size_t needed);
++    // Everything a draw sets before its vertex data (pass, pipeline, depth bias, uniforms, textures); false: skip it
++    bool PrepareDraw(VkCommandBuffer& cmd, FrameSlot*& slot);
++    // Room for `bytes` more in the vertex ring (grown when full); false: drop the draw
++    bool ReserveVertexRing(FrameSlot& slot, size_t bytes);
+     void WriteSet0(FrameSlot& slot);
+     void DestroyTextureData(TextureDataVK& tex, bool deferred);
+ 
+@@ -361,7 +369,7 @@ class GfxRenderingAPIVK final : public GfxRenderingAPI {
+     bool mImGuiInitialized = false;
+ };
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+ extern GfxRenderingAPIVK* gPs5VkApi;
+ #endif
+ } // namespace Fast
+diff --git a/include/fast/interpreter.h b/include/fast/interpreter.h
+index fd88cdd..cfef01a 100644
+--- a/include/fast/interpreter.h
++++ b/include/fast/interpreter.h
+@@ -485,6 +485,10 @@ class Interpreter {
+     void ShaderCacheClear();
+     void TextureCacheClear();
+     std::shared_ptr<Ship::IResource> ResolveResourceCached(const char* path);
++    // G_CULLDL (PS4): are the display list's bounding vertices [first, last] all outside one side of the view
++    // volume? Then the rest of the list cannot be seen. mCullDisplayLists: act on it (gSettings.PS4.CullDL).
++    bool CullDisplayListOutOfView(uint32_t first, uint32_t last);
++    bool mCullDisplayLists = false;
+     bool TextureCacheLookup(int i, const TextureCacheKey& key);
+     void TextureCacheDelete(const uint8_t* origAddr);
+     void TextureCacheDeleteByPalette(const uint8_t* palAddr);
+@@ -654,6 +658,16 @@ class Interpreter {
+     float* mBufVbo; // 3 vertices in a triangle and 32 floats per vtx
+     size_t mBufVboLen{};
+     size_t mBufVboNumTris{};
++    // Indexed batches (GfxSpTri1): every loaded vertex is packed into mBufVbo once per batch and its
++    // triangles refer to it by index. Vertex slot k is in the batch when mBatchVtxEpoch[k] == mBatchEpoch,
++    // at mBatchVtxIndex[k]; a vertex load or modify of the slot, and every flush, end that.
++    uint16_t* mBufIdx = nullptr; // 3 indices a triangle
++    size_t mBufIdxLen{};
++    uint32_t mBatchNumVerts{};
++    uint32_t mBatchEpoch = 1;
++    uint8_t mBatchVtxFloats{};
++    uint32_t mBatchVtxEpoch[MAX_VERTICES + 4]{};
++    uint16_t mBatchVtxIndex[MAX_VERTICES + 4]{};
+     GfxWindowBackend* mWapi = nullptr;
+     GfxRenderingAPI* mRapi = nullptr;
+     std::shared_ptr<GfxDebugger> mGfxDebugger;
+diff --git a/include/ship/resource/ResourceManager.h b/include/ship/resource/ResourceManager.h
+index de921d6..219cf0c 100644
+--- a/include/ship/resource/ResourceManager.h
++++ b/include/ship/resource/ResourceManager.h
+@@ -8,6 +8,8 @@
+ #include <mutex>
+ #include <queue>
+ #include <variant>
++#include <atomic>
++#include <cstdint>
+ #include "ship/resource/Resource.h"
+ #include "ship/resource/ResourceLoader.h"
+ #include "ship/resource/archive/Archive.h"
+@@ -185,6 +187,13 @@ class ResourceManager {
+     std::shared_ptr<IResource> LoadResourceProcess(const ResourceIdentifier& identifier, bool loadExact = false,
+                                                    std::shared_ptr<ResourceInitData> initData = nullptr);
+ 
++    /**
++     * @brief LoadResourceProcess by a C string (the renderer's texture commands): repeats are answered from a
++     * per-thread memo without building any string.
++     */
++    std::shared_ptr<IResource> LoadResourceProcess(const char* filePath, bool loadExact = false,
++                                                   std::shared_ptr<ResourceInitData> initData = nullptr);
++
+     /**
+      * @brief Schedules an asynchronous resource load and returns a future.
+      * @param filePath  Virtual path of the resource.
+@@ -426,6 +435,12 @@ class ResourceManager {
+     std::shared_ptr<BS::thread_pool> mThreadPool;
+     std::mutex mMutex;
+     bool mAltAssetsEnabled = false;
++    // Bumped whenever a cached resource is unloaded or replaced, or alt assets are toggled: the per-thread
++    // lookup memos (ResourceManager.cpp) start over when it moves.
++    std::atomic<uint32_t> mCacheGeneration{ 1 };
++    void BumpCacheGeneration();
++    const std::shared_ptr<IResource>& MemoLookup(const char* name, bool process);
++    const std::shared_ptr<IResource>& MemoLookup(uint64_t crc);
+     // Private information for which owner and archive are default.
+     uintptr_t mDefaultCacheOwner = 0;
+     std::shared_ptr<Archive> mDefaultCacheArchive = nullptr;
+diff --git a/src/fast/Fast3dGui.cpp b/src/fast/Fast3dGui.cpp
+index c8604ce..63b83fc 100644
+--- a/src/fast/Fast3dGui.cpp
++++ b/src/fast/Fast3dGui.cpp
+@@ -30,7 +30,7 @@
+ #ifdef ENABLE_OPENGL
+ #include <imgui_impl_opengl3.h>
+ #include <imgui_impl_sdl2.h>
+-#elif defined(__PROSPERO__)
++#elif defined(__PROSPERO__) || defined(__PS4__)
+ #include <imgui_impl_sdl2.h>
+ #endif
+ 
+diff --git a/src/fast/Fast3dWindow.cpp b/src/fast/Fast3dWindow.cpp
+index 00cf039..e21788e 100644
+--- a/src/fast/Fast3dWindow.cpp
++++ b/src/fast/Fast3dWindow.cpp
+@@ -98,7 +98,7 @@ void Fast3dWindow::Init() {
+         height =
+             Ship::Context::GetRawInstance()->GetConfig()->GetInt("Window.Fullscreen.Height", gameMode ? 800 : 1080);
+     } else {
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+         // PlayStation 5: a new config starts at the TV's 16:9 (the 640x480 desktop default
+         // gives the game a 4:3 picture with side bars)
+         width = Ship::Context::GetRawInstance()->GetConfig()->GetInt("Window.Width", 3840);
+diff --git a/src/fast/backends/gfx_sdl2.cpp b/src/fast/backends/gfx_sdl2.cpp
+index 6f2942f..9659127 100644
+--- a/src/fast/backends/gfx_sdl2.cpp
++++ b/src/fast/backends/gfx_sdl2.cpp
+@@ -1,4 +1,4 @@
+-#if defined(ENABLE_OPENGL) || defined(__APPLE__) || defined(__PROSPERO__)
++#if defined(ENABLE_OPENGL) || defined(__APPLE__) || defined(__PROSPERO__) || defined(__PS4__)
+ 
+ #include <stdio.h>
+ 
+diff --git a/src/fast/backends/gfx_vulkan.cpp b/src/fast/backends/gfx_vulkan.cpp
+index e63fc5f..f76a6b5 100644
+--- a/src/fast/backends/gfx_vulkan.cpp
++++ b/src/fast/backends/gfx_vulkan.cpp
+@@ -19,19 +19,32 @@
+ 
+ #include "fast/backends/gfx_vulkan.h"
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+ // PlayStation 5: no Vulkan loader. RADV is linked into the title, and volk fetches
+ // every command from its entry point.
+ extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char* name);
+-#ifdef __PROSPERO__
++#ifdef __PS4__
++// PS4: RADV through the VideoOut WSI (port/ps4_vk_wsi.cpp), which adds the headless surface and the swapchain
++extern "C" void* ps4_vk_get_instance_proc_addr(void);
++#define SOH_VK_ENTRY ((PFN_vkGetInstanceProcAddr)ps4_vk_get_instance_proc_addr())
++#else
++#define SOH_VK_ENTRY vk_icdGetInstanceProcAddr
++#endif
++#if defined(__PROSPERO__) || defined(__PS4__)
+ extern "C" { float ps5_fps_avg, ps5_fps_low, ps5_frame_max; }
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+ // Frame cost breakdown for the perf line: time blocked on the GPU fence, time in the display-list
+ // interpreter (CPU transform + batching), draw calls and triangles.
+ double ps5_t_fence, ps5_t_interp;
++uint64_t ps5_n_culldl, ps5_n_culldl_out; // interpreter.cpp counts them: G_CULLDL seen / out of view
+ uint64_t ps5_n_draws, ps5_n_tris;
++uint64_t ps5_n_batch_verts; // vertices the indexed batches packed (tris * 3 before them)
+ #endif
+ #endif
++#include "ship/utils/Ps4Stalls.h"
++#if defined(__PROSPERO__) || defined(__PS4__)
++thread_local Ps4Stalls gPs4Stalls;
++#endif
+ // PS5 DevLoop's grab (ps5/src/devloop_shot.c): the frame on screen, when asked for
+ extern "C" bool ps5_shot_requested(void);
+ extern "C" void ps5_shot_write(const uint8_t* pixels, int width, int height, bool bgr);
+@@ -39,12 +52,13 @@ extern "C" void ps5_shot_write(const uint8_t* pixels, int width, int height, boo
+ 
+ #include <vector>
+ #include <mutex>
++#include <thread>
+ #include <set>
+ #include <algorithm>
+ #include <cstring>
+ 
+ #include <SDL2/SDL.h>
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+ #include <sys/resource.h>
+ extern "C" {
+ struct Ps5MallocManagedSize { // SceLibcMallocManagedSize
+@@ -57,6 +71,7 @@ struct Ps5MallocManagedSize { // SceLibcMallocManagedSize
+     size_t currentInuseSize;
+ };
+ int malloc_stats_fast(Ps5MallocManagedSize* mmsize);
++size_t ps4rt_heap_size(void);
+ int32_t sceKernelAvailableFlexibleMemorySize(size_t* available);
+ }
+ #endif
+@@ -314,7 +329,7 @@ static std::string BuildVulkanShader(const CCFeatures& cc_features, bool vertex,
+ }
+ 
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+ #include <sys/stat.h>
+ extern "C" const char* ps5_data_dir(void);
+ // PS5: shaders and pipelines persist in <data>/cache, so a scene seen once does not
+@@ -351,10 +366,19 @@ static double Ps5Ms(uint64_t since) {
+     return (SDL_GetPerformanceCounter() - since) * 1000.0 / (double)SDL_GetPerformanceFrequency();
+ }
+ #endif
++#if defined(__PROSPERO__) || defined(__PS4__)
++static std::mutex sCompileMutex; // the warm-up worker and the renderer can both compile
++#endif
++// One compiler for the whole process, never destroyed: glslang keeps the tables of built-ins its first compile
++// builds only while some compiler is alive (the last one going finalizes it), so a warm-up with a compiler of its
++// own would build them for nothing.
++static shaderc::Compiler& GlslCompiler() {
++    static shaderc::Compiler* compiler = new shaderc::Compiler();
++    return *compiler;
++}
+ static std::vector<uint32_t> CompileGlslToSpirv(const std::string& source, bool vertex) {
+-#ifdef __PROSPERO__
+-    static std::mutex compileMutex; // the warm-up worker and the renderer can both get here
+-    std::lock_guard<std::mutex> lock(compileMutex);
++#if defined(__PROSPERO__) || defined(__PS4__)
++    std::lock_guard<std::mutex> lock(sCompileMutex);
+     const uint64_t t0 = SDL_GetPerformanceCounter();
+     uint64_t h = 1469598103934665603ull ^ (vertex ? 0x76 : 0x66);
+     for (unsigned char c : source) { h ^= c; h *= 1099511628211ull; }
+@@ -371,7 +395,7 @@ static std::vector<uint32_t> CompileGlslToSpirv(const std::string& source, bool
+         }
+     }
+ #endif
+-    static shaderc::Compiler compiler;
++    shaderc::Compiler& compiler = GlslCompiler();
+     shaderc::CompileOptions options;
+     options.SetTargetEnvironment(shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_1);
+     options.SetOptimizationLevel(shaderc_optimization_level_performance);
+@@ -389,13 +413,41 @@ static std::vector<uint32_t> CompileGlslToSpirv(const std::string& source, bool
+         abort();
+     }
+     std::vector<uint32_t> words(result.cbegin(), result.cend());
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     Ps5WriteFile(spvPath, words.data(), words.size() * 4);
+-    SPDLOG_INFO("perf: compiled {} shader {} in {:.1f} ms", vertex ? "vertex" : "fragment", name, Ps5Ms(t0));
++    const double compileMs = Ps5Ms(t0);
++    gPs4Stalls.ms += compileMs;
++    gPs4Stalls.shaders++;
++    SPDLOG_INFO("perf: compiled {} shader {} in {:.1f} ms", vertex ? "vertex" : "fragment", name, compileMs);
+ #endif
+     return words;
+ }
+ 
++#if defined(__PROSPERO__) || defined(__PS4__)
++// glslang builds its tables of built-in declarations, per shader stage, on its first compile: ~400 ms on the PS4's
++// CPU. Once the SPIR-V disk cache holds every shader the warm-up knows, nothing compiles at start-up any more, and
++// the first new combiner of a session (a new place, an item) paid it in the middle of the game. A throwaway vertex
++// and fragment shader at start-up, past the cache, pay it there instead.
++static void WarmUpShaderCompiler() {
++    static std::once_flag once;
++    std::call_once(once, [] {
++        std::lock_guard<std::mutex> lock(sCompileMutex);
++        const uint64_t t0 = SDL_GetPerformanceCounter();
++        shaderc::Compiler& compiler = GlslCompiler();
++        shaderc::CompileOptions options;
++        options.SetTargetEnvironment(shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_1);
++        options.SetOptimizationLevel(shaderc_optimization_level_performance);
++        compiler.CompileGlslToSpv("#version 450\nlayout(location = 0) in vec4 aPos;\n"
++                                  "void main() { gl_Position = aPos; }\n",
++                                  shaderc_vertex_shader, "warmup.vert", options);
++        compiler.CompileGlslToSpv("#version 450\nlayout(location = 0) out vec4 vColor;\n"
++                                  "void main() { vColor = vec4(1.0); }\n",
++                                  shaderc_fragment_shader, "warmup.frag", options);
++        SPDLOG_INFO("perf: shader compiler warmed up in {:.1f} ms", Ps5Ms(t0));
++    });
++}
++#endif
++
+ // MARK: - Helpers
+ 
+ static VkSamplerAddressMode gfx_cm_to_vk(uint32_t val, bool hasMirrorClamp) {
+@@ -824,8 +876,8 @@ bool GfxRenderingAPIVK::VulkanInit(SDL_Window* window) {
+     SDL_Vulkan_GetInstanceExtensions(window, &sdlExtCount, instanceExts.data());
+ 
+     uint32_t availExtCount = 0;
+-#ifdef __PROSPERO__
+-    volkInitializeCustom(vk_icdGetInstanceProcAddr);
++#if defined(__PROSPERO__) || defined(__PS4__)
++    volkInitializeCustom(SOH_VK_ENTRY);
+ #endif
+     vkEnumerateInstanceExtensionProperties(nullptr, &availExtCount, nullptr);
+     std::vector<VkExtensionProperties> availExts(availExtCount);
+@@ -855,7 +907,7 @@ bool GfxRenderingAPIVK::VulkanInit(SDL_Window* window) {
+         SPDLOG_ERROR("Vulkan: vkCreateInstance failed");
+         return false;
+     }
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     volkLoadInstance(mInstance);
+ #endif
+ 
+@@ -969,7 +1021,7 @@ bool GfxRenderingAPIVK::VulkanInit(SDL_Window* window) {
+         pli.setLayoutCount = 2;
+         pli.pSetLayouts = layouts;
+         VK_CHECK(vkCreatePipelineLayout(mDevice, &pli, nullptr, &mPipelineLayout));
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+         {
+             std::vector<uint8_t> data;
+             Ps5ReadFile(Ps5CacheDir() + "/vk_pipelines.bin", data);
+@@ -1018,7 +1070,8 @@ bool GfxRenderingAPIVK::VulkanInit(SDL_Window* window) {
+         VK_CHECK(vkCreateSemaphore(mDevice, &sci, nullptr, &slot.imageAvailable));
+         VK_CHECK(vkCreateSemaphore(mDevice, &sci, nullptr, &slot.renderFinished));
+ 
+-        CreateBuffer(mVertexRingCapacity, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
++        // vertices and, for indexed batches, their indices (DrawIndexedTriangles)
++        CreateBuffer(mVertexRingCapacity, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, slot.vertexBuffer,
+                      slot.vertexMemory, &slot.vertexMapped);
+         CreateBuffer(mUniformRingCapacity, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+@@ -1200,7 +1253,8 @@ bool GfxRenderingAPIVK::GrowVertexRing(FrameSlot& slot, size_t needed) {
+     VkBuffer buffer;
+     VkDeviceMemory memory;
+     uint8_t* mapped = nullptr;
+-    if (!TryCreateHostBuffer(capacity, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, buffer, memory, &mapped)) {
++    if (!TryCreateHostBuffer(capacity, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT, buffer,
++                             memory, &mapped)) {
+         SPDLOG_ERROR("Vulkan: could not grow the vertex ring to {} MB", capacity >> 20);
+         return false;
+     }
+@@ -1259,7 +1313,7 @@ void GfxRenderingAPIVK::NewFrame() {
+     FrameSlot& slot = mFrames[mFrameSlot];
+ 
+     if (slot.fenceInFlight) {
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+         const uint64_t fw0 = SDL_GetPerformanceCounter();
+         VK_CHECK(vkWaitForFences(mDevice, 1, &slot.fence, VK_TRUE, UINT64_MAX));
+         ps5_t_fence += (SDL_GetPerformanceCounter() - fw0) * 1000.0 / SDL_GetPerformanceFrequency();
+@@ -1334,6 +1388,7 @@ void GfxRenderingAPIVK::RenderDrawData(ImDrawData* drawData) {
+     ImGui_ImplVulkan_RenderDrawData(drawData, fb.mCommandBuffer);
+     // ImGui leaves arbitrary pipeline/descriptor/viewport state behind
+     fb.mLastPipeline = VK_NULL_HANDLE;
++    fb.mBoundRing = VK_NULL_HANDLE;
+     fb.mLastShaderProgram = nullptr;
+     for (uint32_t i = 0; i < 4; i++) {
+         fb.mLastSet0Offsets[i] = UINT32_MAX;
+@@ -1363,7 +1418,7 @@ GfxClipParameters GfxRenderingAPIVK::GetClipParameters() {
+ }
+ 
+ void GfxRenderingAPIVK::Init() {
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     gPs5VkApi = this;
+ #endif
+     // fb 0 represents the swapchain
+@@ -1384,7 +1439,7 @@ void GfxRenderingAPIVK::ClearShaderCache() {
+     }
+ }
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+ GfxRenderingAPIVK* gPs5VkApi = nullptr;
+ 
+ // every combiner key the game asks for is appended (once) to <data>/cache/shader_keys.txt;
+@@ -1426,11 +1481,12 @@ void GfxRenderingAPIVK::Ps5PrecompileShaders(const std::vector<std::pair<uint64_
+         if (done != nullptr) (*done)++;
+     }
+     SPDLOG_INFO("perf: shader warm-up {} programs in {:.0f} ms", keys.size(), Ps5Ms(t0));
++    WarmUpShaderCompiler();
+ }
+ #endif
+ 
+ ShaderProgram* GfxRenderingAPIVK::CreateAndLoadNewShader(uint64_t shaderId0, uint64_t shaderId1) {
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     Ps5LogShaderKey(shaderId0, shaderId1);
+ #endif
+     CCFeatures cc_features;
+@@ -1811,10 +1867,12 @@ VkPipeline GfxRenderingAPIVK::GetPipelineForState(ShaderProgramVK* prg, Framebuf
+     pci.subpass = 0;
+ 
+     VkPipeline pipeline = VK_NULL_HANDLE;
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     const uint64_t t0 = SDL_GetPerformanceCounter();
+     VkResult res = vkCreateGraphicsPipelines(mDevice, mPipelineCache, 1, &pci, nullptr, &pipeline);
+     const double took = Ps5Ms(t0);
++    gPs4Stalls.ms += took;
++    gPs4Stalls.shaders++;
+     mPipelineCacheDirty = true;
+     mPipelineCacheLastChange = SDL_GetTicks64();
+     if (took > 1.0) {
+@@ -1905,23 +1963,21 @@ void GfxRenderingAPIVK::WriteDrawUniformsIfDirty() {
+     }
+ }
+ 
+-void GfxRenderingAPIVK::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris) {
+-#ifdef __PROSPERO__
+-    ps5_n_draws++;
+-    ps5_n_tris += buf_vbo_num_tris;
+-#endif
++bool GfxRenderingAPIVK::PrepareDraw(VkCommandBuffer& cmdOut, FrameSlot*& slotOut) {
+     if (mShaderProgram == nullptr || !mFrameActive) {
+-        return;
++        return false;
+     }
+     EnsurePassActive(mCurrentFramebuffer);
+     FramebufferVK& fb = mFramebuffers[mCurrentFramebuffer];
+     FrameSlot& slot = mFrames[mFrameSlot];
+     VkCommandBuffer cmd = fb.mCommandBuffer;
++    cmdOut = cmd;
++    slotOut = &slot;
+ 
+     // Pipeline (covers shader + depth + cull + blend + msaa state)
+     VkPipeline pipeline = GetPipelineForState(mShaderProgram, fb);
+     if (pipeline == VK_NULL_HANDLE) {
+-        return;
++        return false;
+     }
+     if (pipeline != fb.mLastPipeline) {
+         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+@@ -1995,21 +2051,42 @@ void GfxRenderingAPIVK::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size_
+             memcpy(fb.mLastBoundSamplers, samplers, sizeof(samplers));
+         }
+     }
++    return true;
++}
+ 
+-    // Vertex data
+-    size_t dataSize = sizeof(float) * buf_vbo_len;
+-    if (mVertexRingOffset + dataSize > slot.vertexCapacity && !GrowVertexRing(slot, dataSize)) {
++bool GfxRenderingAPIVK::ReserveVertexRing(FrameSlot& slot, size_t bytes) {
++    if (mVertexRingOffset + bytes > slot.vertexCapacity && !GrowVertexRing(slot, bytes)) {
+         // still full (at the 256 MB cap, or out of memory): skip this draw, nothing else
+         static uint64_t sLastLog = 0;
+         if (SDL_GetTicks64() - sLastLog > 1000) {
+             sLastLog = SDL_GetTicks64();
+             SPDLOG_ERROR("Vulkan: vertex ring overflow, dropping draw");
+         }
++        return false;
++    }
++    return true;
++}
++
++void GfxRenderingAPIVK::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris) {
++#if defined(__PROSPERO__) || defined(__PS4__)
++    ps5_n_draws++;
++    ps5_n_tris += buf_vbo_num_tris;
++#endif
++    VkCommandBuffer cmd;
++    FrameSlot* slot;
++    if (!PrepareDraw(cmd, slot)) {
++        return;
++    }
++
++    // Vertex data
++    size_t dataSize = sizeof(float) * buf_vbo_len;
++    if (!ReserveVertexRing(*slot, dataSize)) {
+         return;
+     }
+-    memcpy(slot.vertexMapped + mVertexRingOffset, buf_vbo, dataSize);
++    memcpy(slot->vertexMapped + mVertexRingOffset, buf_vbo, dataSize);
+     VkDeviceSize vbOffset = mVertexRingOffset;
+-    vkCmdBindVertexBuffers(cmd, 0, 1, &slot.vertexBuffer, &vbOffset);
++    vkCmdBindVertexBuffers(cmd, 0, 1, &slot->vertexBuffer, &vbOffset);
++    mFramebuffers[mCurrentFramebuffer].mBoundRing = VK_NULL_HANDLE;
+     mVertexRingOffset += dataSize;
+     mFrameVertexBytes += dataSize;
+     mVertexRingPeak = std::max(mVertexRingPeak, mFrameVertexBytes);
+@@ -2017,6 +2094,56 @@ void GfxRenderingAPIVK::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size_
+     vkCmdDraw(cmd, (uint32_t)(buf_vbo_num_tris * 3), 1, 0, 0);
+ }
+ 
++// The interpreter's indexed batches: the vertices, then their 16-bit indices right after them in the same ring
++// (it is an index buffer too), and one indexed draw. Each vertex is copied, fetched and transformed once instead of
++// once per triangle corner.
++void GfxRenderingAPIVK::DrawIndexedTriangles(float buf_vbo[], size_t buf_vbo_len, size_t floats_per_vertex,
++                                             const uint16_t* indices, size_t num_indices) {
++#if defined(__PROSPERO__) || defined(__PS4__)
++    ps5_n_draws++;
++    ps5_n_tris += num_indices / 3;
++    ps5_n_batch_verts += floats_per_vertex ? buf_vbo_len / floats_per_vertex : 0;
++#endif
++    VkCommandBuffer cmd;
++    FrameSlot* slot;
++    if (num_indices == 0 || !PrepareDraw(cmd, slot)) {
++        return;
++    }
++
++    // The ring stays bound at offset 0 (once per command buffer, not per draw: a vertex buffer change costs RADV
++    // its vertex descriptors again at the draw): the vertices start at a multiple of their size, which the draw
++    // gives as vertexOffset, and the indices follow them, firstIndex in 16-bit units.
++    const size_t stride = sizeof(float) * floats_per_vertex;
++    const size_t vertexBytes = sizeof(float) * buf_vbo_len;
++    const size_t indexBytes = sizeof(uint16_t) * num_indices;
++    if (stride == 0) {
++        return;
++    }
++    // worst case: the alignment padding, and the next draw's start back on 4 bytes
++    if (!ReserveVertexRing(*slot, stride + vertexBytes + indexBytes + 4)) {
++        return;
++    }
++    const size_t vertexStart = (mVertexRingOffset + stride - 1) / stride * stride;
++    const size_t indexStart = vertexStart + vertexBytes; // a multiple of 4
++    const size_t end = (indexStart + indexBytes + 3) & ~(size_t)3;
++    uint8_t* const base = slot->vertexMapped;
++    memcpy(base + vertexStart, buf_vbo, vertexBytes);
++    memcpy(base + indexStart, indices, indexBytes);
++    FramebufferVK& fb = mFramebuffers[mCurrentFramebuffer];
++    if (fb.mBoundRing != slot->vertexBuffer) {
++        const VkDeviceSize zero = 0;
++        vkCmdBindVertexBuffers(cmd, 0, 1, &slot->vertexBuffer, &zero);
++        vkCmdBindIndexBuffer(cmd, slot->vertexBuffer, 0, VK_INDEX_TYPE_UINT16);
++        fb.mBoundRing = slot->vertexBuffer;
++    }
++    mFrameVertexBytes += end - mVertexRingOffset;
++    mVertexRingOffset = end;
++    mVertexRingPeak = std::max(mVertexRingPeak, mFrameVertexBytes);
++
++    vkCmdDrawIndexed(cmd, (uint32_t)num_indices, 1, (uint32_t)(indexStart / sizeof(uint16_t)),
++                     (int32_t)(vertexStart / stride), 0);
++}
++
+ void GfxRenderingAPIVK::OnResize() {
+     mSwapchainNeedsRecreate = true;
+ }
+@@ -2091,6 +2218,7 @@ void GfxRenderingAPIVK::EnsurePassActive(int fbId) {
+ 
+     // Pipeline/descriptor state does not survive across render passes
+     fb.mLastPipeline = VK_NULL_HANDLE;
++    fb.mBoundRing = VK_NULL_HANDLE;
+     fb.mLastShaderProgram = nullptr;
+     for (uint32_t i = 0; i < 4; i++) {
+         fb.mLastSet0Offsets[i] = UINT32_MAX;
+@@ -2214,9 +2342,25 @@ void GfxRenderingAPIVK::UpdateFramebufferParameters(int fbId, uint32_t width, ui
+ 
+     width = std::max(width, 1u);
+     height = std::max(height, 1u);
+-    msaaLevel = std::max(msaaLevel, 1u);
+-    while (msaaLevel > 1 && (mDeviceProps.limits.framebufferColorSampleCounts & msaaLevel) == 0) {
+-        msaaLevel--;
++    // A sample count is a single bit (1, 2, 4, 8) and the setting's slider also gives 3, 5, 6 and 7. The loop that
++    // was here kept any value sharing a bit with the supported counts: 3 (bits 1 and 2) went to the driver as it
++    // was, an invalid count, and the game closed. Down to the highest supported power of two, for color and depth.
++    {
++        uint32_t limit = std::max(msaaLevel, 1u);
++#ifdef __PS4__
++        // SOHVK_MSAA_MAX in env.txt caps it (for a console where a higher count misbehaves)
++        if (const char* cap = getenv("SOHVK_MSAA_MAX"); cap != nullptr && atoi(cap) > 0) {
++            limit = std::min(limit, (uint32_t)atoi(cap));
++        }
++#endif
++        const VkSampleCountFlags supported =
++            mDeviceProps.limits.framebufferColorSampleCounts & mDeviceProps.limits.framebufferDepthSampleCounts;
++        msaaLevel = 1;
++        for (uint32_t samples = 2; samples <= limit && samples <= 64; samples <<= 1) {
++            if ((supported & samples) != 0) {
++                msaaLevel = samples;
++            }
++        }
+     }
+ 
+     bool diff = fb.mWidth != width || fb.mHeight != height || fb.mMsaaLevel != msaaLevel ||
+@@ -2596,7 +2740,7 @@ void GfxRenderingAPIVK::EndFrame() {
+         mScreenReadbackDataReady = true;
+     }
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     {
+         // Frame pacing to klog every 10 s (always on, cheap): avg fps, 1% low fps, max frame
+         // time, frames over 20 ms / 40 ms. GHOSTSHIP_PS5_FPS=0 in env.txt turns it off.
+@@ -2631,19 +2775,30 @@ void GfxRenderingAPIVK::EndFrame() {
+                             over20, over40, n);
+                 SPDLOG_INFO("perf: rings peak vertex {} KB of {} KB, uniform {} KB of {} KB", mVertexRingPeak >> 10,
+                             slot.vertexCapacity >> 10, mUniformRingPeak >> 10, slot.uniformCapacity >> 10);
+-                SPDLOG_INFO("perf: per frame gpu-wait {:.1f} ms, dl-interp {:.1f} ms, {} draws, {} tris",
+-                            ps5_t_fence / n, ps5_t_interp / n, ps5_n_draws / n, ps5_n_tris / n);
++                // culldl: G_CULLDL out of view / seen, and whether "Skip Off-screen Geometry" skipped them
++                const bool cullOn =
++                    Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger("gSettings.PS4.CullDL", 0) != 0;
++                SPDLOG_INFO("perf: per frame gpu-wait {:.1f} ms, dl-interp {:.1f} ms, {} draws, {} tris, {} verts, "
++                            "culldl {}/{} out of view ({})",
++                            ps5_t_fence / n, ps5_t_interp / n, ps5_n_draws / n, ps5_n_tris / n, ps5_n_batch_verts / n,
++                            ps5_n_culldl_out / n, ps5_n_culldl / n, cullOn ? "skipped" : "drawn, option off");
+                 ps5_t_fence = ps5_t_interp = 0;
+-                ps5_n_draws = ps5_n_tris = 0;
++                ps5_n_draws = ps5_n_tris = ps5_n_batch_verts = 0;
++                ps5_n_culldl = ps5_n_culldl_out = 0;
+                 mVertexRingPeak = 0;
+                 mUniformRingPeak = 0;
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+                 {
+                     // memory headroom: libc heap in use / held from the system, peak RSS, flexible memory free
+                     Ps5MallocManagedSize mm {};
+                     mm.size = sizeof(mm);
+                     mm.version = 1;
++#ifdef __PS4__
++                    mm.currentInuseSize = ps4rt_heap_size(); // the PS4 runtime's heap (port/ps4_runtime.cpp)
++                    mm.currentSystemSize = mm.currentInuseSize;
++#else
+                     malloc_stats_fast(&mm);
++#endif
+                     size_t alloc = mm.currentInuseSize, resident = mm.currentSystemSize, avail = 0;
+                     sceKernelAvailableFlexibleMemorySize(&avail);
+                     struct rusage ru {};
+@@ -2730,7 +2885,7 @@ void GfxRenderingAPIVK::EndFrame() {
+     pi.pSwapchains = &mSwapchain;
+     pi.pImageIndices = &mSwapchainImageIndex;
+     VkResult present = vkQueuePresentKHR(mQueue, &pi);
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     // write the pipeline cache back once new pipelines have settled for 5 s
+     if (mPipelineCacheDirty && mPipelineCache != VK_NULL_HANDLE && SDL_GetTicks64() - mPipelineCacheLastChange > 5000) {
+         mPipelineCacheDirty = false;
+@@ -2756,6 +2911,7 @@ void GfxRenderingAPIVK::EndFrame() {
+         fb.mPassActive = false;
+         fb.mHasEnded = false;
+         fb.mLastPipeline = VK_NULL_HANDLE;
++        fb.mBoundRing = VK_NULL_HANDLE;
+         fb.mLastShaderProgram = nullptr;
+         for (uint32_t i = 0; i < 4; i++) {
+             fb.mLastSet0Offsets[i] = UINT32_MAX;
+@@ -2827,7 +2983,7 @@ bool Vulkan_IsSupported() {
+ 
+ #endif
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+ // called by SoH's start-up warm-up screen (soh/OTRGlobals.cpp) without Vulkan headers
+ bool Ps5ShaderWarmupAvailable() {
+     return Fast::gPs5VkApi != nullptr;
+@@ -2838,4 +2994,9 @@ std::string Ps5ShaderWarmupSalt() {
+ void Ps5ShaderWarmup(const std::vector<std::pair<uint64_t, uint64_t>>& keys, std::atomic<size_t>* done) {
+     if (Fast::gPs5VkApi != nullptr) Fast::gPs5VkApi->Ps5PrecompileShaders(keys, done);
+ }
++// every start (the warm-up proper only runs when its stamp is stale): glslang's first-compile cost on a worker
++// thread, while the game loads, instead of in the first new place or menu of the session
++void Ps5ShaderCompilerWarmup() {
++    std::thread([] { Fast::WarmUpShaderCompiler(); }).detach();
++}
+ #endif
+diff --git a/src/fast/interpreter.cpp b/src/fast/interpreter.cpp
+index b073628..1ad0047 100644
+--- a/src/fast/interpreter.cpp
++++ b/src/fast/interpreter.cpp
+@@ -1,8 +1,9 @@
+ #define NOMINMAX
+ 
+ #include <chrono>
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+ extern double ps5_t_interp; // gfx_vulkan.cpp perf line
++extern uint64_t ps5_n_culldl, ps5_n_culldl_out; // gfx_vulkan.cpp perf line: G_CULLDL seen / out of view
+ #endif
+ #include <math.h>
+ #include <stdint.h>
+@@ -39,6 +40,7 @@ extern double ps5_t_interp; // gfx_vulkan.cpp perf line
+ #include "ship/window/gui/Gui.h"
+ #include "ship/resource/ResourceManager.h"
+ #include "ship/utils/Utils.h"
++#include "ship/utils/Ps4Stalls.h"
+ #include "ship/Context.h"
+ #include "ship/config/ConsoleVariable.h"
+ 
+@@ -115,12 +117,17 @@ static std::string GetPathWithoutFileName(char* filePath) {
+     return filePath;
+ }
+ 
+-constexpr size_t MAX_TRI_BUFFER = 256;
++// Triangles a batch holds before it is drawn anyway. 1024 (was 256): a texture pack's terrain is thousands of
++// triangles in one material, and each extra draw is a uniform latch plus RADV's draw setup on the PS4's CPU.
++// Indexed batches keep the vertex count of one well under the 16-bit index range (3 per triangle at most).
++constexpr size_t MAX_TRI_BUFFER = 1024;
++static_assert(MAX_TRI_BUFFER * 3 <= 65535, "batch vertices must fit 16-bit indices");
+ 
+ Interpreter::Interpreter() {
+     mRsp = new RSP();
+     mRdp = new RDP();
+     mBufVbo = new float[MAX_TRI_BUFFER * (32 * 3)];
++    mBufIdx = new uint16_t[MAX_TRI_BUFFER * 3];
+     memset(mBatchSlotForHistory, -1, sizeof(mBatchSlotForHistory));
+     memset(mPaletteRingTexture, 0xFF, sizeof(mPaletteRingTexture));
+ }
+@@ -129,12 +136,28 @@ Interpreter::~Interpreter() {
+     delete mRsp;
+     delete mRdp;
+     delete[] mBufVbo;
++    delete[] mBufIdx;
+ }
+ 
+ static std::weak_ptr<Interpreter> mInstance;
++// The instance as a plain pointer for the command handlers: mInstance.lock() in each of them cost two atomic
++// read-modify-writes per display-list command (~100k commands a frame with a texture pack; 2-3% of the PS4's frame).
++// The interpreter lives as long as the window that set it.
++static Interpreter* sGfxRaw = nullptr;
+ // Set a cached pointer to the instance so we don't need to go through the window every time
+ void GfxSetInstance(std::shared_ptr<Interpreter> gfx) {
+     mInstance = gfx;
++    sGfxRaw = gfx.get();
++}
++
++// The resource manager as a plain pointer: Context::GetResourceManager() returns a shared_ptr by value (two atomic
++// operations per display-list path lookup). Refreshed at the start of every frame (Interpreter::Run).
++static Ship::ResourceManager* sResMgr = nullptr;
++static inline Ship::ResourceManager* ResMgr() {
++    if (sResMgr == nullptr) {
++        sResMgr = Ship::Context::GetRawInstance()->GetResourceManager().get();
++    }
++    return sResMgr;
+ }
+ 
+ // N64 prim_depth is 15-bit (0 near, 0x7FFF far).
+@@ -145,9 +168,17 @@ void Interpreter::Flush() {
+         mRapi->SetCurrentPrimDepth((float)mRdp->prim_depth / N64_PRIM_DEPTH_MAX);
+         LatchCombinerUniforms();
+         mRapi->SetTransformUniforms(mTransform);
+-        mRapi->DrawTriangles(mBufVbo, mBufVboLen, mBufVboNumTris);
++        mRapi->DrawIndexedTriangles(mBufVbo, mBufVboLen, mBatchVtxFloats, mBufIdx, mBufIdxLen);
+         mBufVboLen = 0;
+         mBufVboNumTris = 0;
++        mBufIdxLen = 0;
++        mBatchNumVerts = 0;
++        mBatchVtxFloats = 0;
++        // Vertices are packed per batch too: the next batch packs again what it uses
++        if (++mBatchEpoch == 0) {
++            memset(mBatchVtxEpoch, 0, sizeof(mBatchVtxEpoch));
++            mBatchEpoch = 1;
++        }
+         // Palette slots are assigned per batch; the next batch starts empty
+         memset(mBatchSlotForHistory, -1, sizeof(mBatchSlotForHistory));
+         mBatchMtxCount = 0;
+@@ -693,13 +724,13 @@ std::shared_ptr<Ship::IResource> Interpreter::ResolveResourceCached(const char*
+         return nullptr;
+     }
+     if (!mResolvedResourceCacheEnabled) {
+-        return Ship::Context::GetRawInstance()->GetResourceManager()->LoadResourceProcess(path);
++        return ResMgr()->LoadResourceProcess(path);
+     }
+     auto it = mResolvedResourceCache.find(path);
+     if (it != mResolvedResourceCache.end()) {
+         return it->second;
+     }
+-    auto res = Ship::Context::GetRawInstance()->GetResourceManager()->LoadResourceProcess(path);
++    auto res = ResMgr()->LoadResourceProcess(path);
+     // Only memoize a hit. The resource manager caches its own misses, so re-asking
+     // for one is cheap, and CacheExternalResource can turn a path that missed into a
+     // valid resource at runtime. A memoized null would outlive the resource itself.
+@@ -2161,6 +2192,25 @@ void Interpreter::AdjustWidthHeightForScale(uint32_t& width, uint32_t& height, u
+     }
+ }
+ 
++// Triangle state cache. Everything GfxSpTri1 derives before packing vertices (cull, depth,
++// viewport, combiner, textures, shader program, uniforms) depends only on RSP/RDP state set by
++// display-list commands. gfx_step bumps sTriStateGen for every command but the neutral ones
++// (IsTriStateNeutral: triangles, vertex and matrix loads, display-list calls and returns, syncs),
++// so the triangles of a mesh reuse the last result and only pack their vertices.
++// Dense meshes (Djipi's 3DS Hyrule Field: ~45k triangles a frame) spent most of the frame here.
++static uint32_t sTriStateGen = 1;
++static struct {
++    uint32_t gen = 0;
++    ColorCombiner* comb = nullptr;
++    bool usedTextures[2] = { false, false };
++    bool normalsInShade = false;
++    bool useAlpha = false;
++} sTriCache;
++
++// Texture slot 0 holds a framebuffer (G_SETTIMG_FB) rather than an imported texture, until the next texture image
++// (GfxDpSetTextureImage): GfxSpTri1 must not import over it.
++static bool sTexSlot0IsFb = false;
++
+ void Interpreter::GfxSpVertex(size_t n_vertices, size_t dest_index, const F3DVtx* vertices) {
+     // The position transform runs in the vertex shader: capture the current
+     // model-view-projection (with the widescreen aspect scale folded in) in the
+@@ -2172,14 +2222,34 @@ void Interpreter::GfxSpVertex(size_t n_vertices, size_t dest_index, const F3DVtx
+         mMtxCurrentValid = true;
+     }
+ 
+-    for (size_t i = 0; i < n_vertices; i++, dest_index++) {
+-        const F3DVtx_t* v = &vertices[i].v;
+-        const F3DVtx_tn* vn = &vertices[i].n;
+-        struct LoadedVertex* d = &mRsp->loaded_vertices[dest_index];
++    // (&vertices[i].v, the old per-vertex null test, is null only for a null array)
++    if (vertices == nullptr || n_vertices == 0) {
++        return;
++    }
+ 
+-        if (v == nullptr) {
+-            return;
++    const bool lighting = (mRsp->geometry_mode & G_LIGHTING) != 0;
++    if (lighting && mRsp->lights_changed) {
++        // Lighting and texgen now run in the vertex shader. The light/lookat
++        // direction coefficients are still computed here (they depend on the
++        // modelview matrix at vertex-load time) and are passed as uniforms.
++        for (int i = 0; i < mRsp->current_num_lights - 1; i++) {
++            CalculateNormalDir(&mRsp->current_lights[i].l, mRsp->current_lights_coeffs[i]);
+         }
++        CalculateNormalDir(&mRsp->lookat[0], mRsp->current_lookat_coeffs[0]);
++        CalculateNormalDir(&mRsp->lookat[1], mRsp->current_lookat_coeffs[1]);
++        mRsp->lights_changed = false;
++        // The lighting uniforms GfxSpTri1 latches are made of these: its cached state is stale now
++        sTriStateGen++;
++    }
++
++    // Past the vertex pool (a bad display list) the old loop wrote over the rest of the RSP state
++    const size_t end = std::min(dest_index + n_vertices, (size_t)(MAX_VERTICES + 4));
++    for (const F3DVtx* src = vertices; dest_index < end; src++, dest_index++) {
++        const F3DVtx_t* v = &src->v;
++        const F3DVtx_tn* vn = &src->n;
++        struct LoadedVertex* d = &mRsp->loaded_vertices[dest_index];
++        // a reloaded slot is packed again by the next triangle that uses it
++        mBatchVtxEpoch[dest_index] = 0;
+ 
+         d->x = v->ob[0];
+         d->y = v->ob[1];
+@@ -2190,19 +2260,7 @@ void Interpreter::GfxSpVertex(size_t n_vertices, size_t dest_index, const F3DVtx
+         short U = v->tc[0] * mRsp->texture_scaling_factor.s >> 16;
+         short V = v->tc[1] * mRsp->texture_scaling_factor.t >> 16;
+ 
+-        if (mRsp->geometry_mode & G_LIGHTING) {
+-            // Lighting and texgen now run in the vertex shader. The light/lookat
+-            // direction coefficients are still computed here (they depend on the
+-            // modelview matrix at vertex-load time) and are passed as uniforms.
+-            if (mRsp->lights_changed) {
+-                for (int i = 0; i < mRsp->current_num_lights - 1; i++) {
+-                    CalculateNormalDir(&mRsp->current_lights[i].l, mRsp->current_lights_coeffs[i]);
+-                }
+-                CalculateNormalDir(&mRsp->lookat[0], mRsp->current_lookat_coeffs[0]);
+-                CalculateNormalDir(&mRsp->lookat[1], mRsp->current_lookat_coeffs[1]);
+-                mRsp->lights_changed = false;
+-            }
+-
++        if (lighting) {
+             d->normal[0] = vn->n[0];
+             d->normal[1] = vn->n[1];
+             d->normal[2] = vn->n[2];
+@@ -2234,6 +2292,9 @@ void Interpreter::GfxSpModifyVertex(uint16_t vtx_idx, uint8_t where, uint32_t va
+     LoadedVertex* v = &mRsp->loaded_vertices[vtx_idx];
+     v->u = s;
+     v->v = t;
++    if (vtx_idx < MAX_VERTICES + 4) {
++        mBatchVtxEpoch[vtx_idx] = 0;
++    }
+ }
+ 
+ // Cheap pre-parse of a combine mode for SHADE references, used to decide whether
+@@ -2259,30 +2320,27 @@ static bool CombineModeUsesShade(uint64_t combine_mode, bool is2Cyc) {
+     return false;
+ }
+ 
+-// Triangle state cache. Everything GfxSpTri1 derives before packing vertices (cull, depth,
+-// viewport, combiner, textures, shader program, uniforms) depends only on RSP/RDP state set by
+-// display-list commands. gfx_step bumps sTriStateGen for every command except the triangle
+-// commands, so consecutive triangles with no command in between (a G_TRI2's two halves, a run
+-// of G_TRI1/G_TRI2/G_QUAD after one G_VTX) reuse the last result and only pack their vertices.
+-// Dense meshes (Djipi's 3DS Hyrule Field: ~30k triangles a frame) spent most of the frame here.
+-static uint32_t sTriStateGen = 1;
+-static struct {
+-    uint32_t gen = 0;
+-    ColorCombiner* comb = nullptr;
+-    bool usedTextures[2] = { false, false };
+-    bool normalsInShade = false;
+-    bool useAlpha = false;
+-} sTriCache;
+-
+ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx, bool is_rect) {
+     struct LoadedVertex* v1 = &mRsp->loaded_vertices[vtx1_idx];
+     struct LoadedVertex* v2 = &mRsp->loaded_vertices[vtx2_idx];
+     struct LoadedVertex* v3 = &mRsp->loaded_vertices[vtx3_idx];
+     struct LoadedVertex* v_arr[3] = { v1, v2, v3 };
++    const uint8_t vtx_idx[3] = { vtx1_idx, vtx2_idx, vtx3_idx };
+ 
+     // Map the triangle's matrix-history entries onto the per-draw palette (flushing if the
+-    // palette is full: the batch restarts with empty slots) and pack its three vertices.
++    // palette is full: the batch restarts with empty slots) and add the triangle to the batch:
++    // three indices, and each vertex packed the first time the batch uses it (indexed batches:
++    // the vertices of a mesh are shared by ~5 triangle corners each, and were packed, copied to
++    // the GPU and transformed once per corner).
+     auto emit = [&](const bool usedTextures[2], bool usedShade, bool normals_in_shade, bool use_alpha) {
++        const bool shade = usedShade || normals_in_shade;
++        const uint8_t vtx_floats =
++            5 + (usedTextures[0] ? 2 : 0) + (usedTextures[1] ? 2 : 0) + (shade ? (use_alpha ? 4 : 3) : 0);
++        // One vertex layout per batch (any change of shader program or blending flushed already)
++        if (mBufVboNumTris > 0 && vtx_floats != mBatchVtxFloats) {
++            Flush();
++        }
++
+         uint8_t mtx_slots[3];
+         for (int attempt = 0; attempt < 2; attempt++) {
+             bool flushed = false;
+@@ -2306,14 +2364,32 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
+             }
+         }
+ 
++        // (a flush above emptied the batch; its layout is this triangle's)
++        mBatchVtxFloats = vtx_floats;
++
++        // Packed through a local pointer, and 8-bit colors scaled by a multiplication: a float division
++        // is ~15 cycles on the PS4's CPU and dense texture-pack meshes pack ~45k triangles a frame here.
++        // (k / 255 and k * (1 / 255) differ by at most an ulp; 0 and 255 still give exactly 0 and 1.)
++        constexpr float kInv255 = 1.0f / 255.0f;
++        uint16_t* idx = mBufIdx + mBufIdxLen;
+         for (int i = 0; i < 3; i++) {
++            const uint8_t slotIdx = vtx_idx[i];
++            // Rectangles rewrite their four vertices (past the pool) for every rectangle: never reused
++            const bool reusable = !is_rect && slotIdx < MAX_VERTICES;
++            if (reusable && mBatchVtxEpoch[slotIdx] == mBatchEpoch) {
++                idx[i] = mBatchVtxIndex[slotIdx];
++                continue;
++            }
++
++            const LoadedVertex* v = v_arr[i];
++            float* out = mBufVbo + mBufVboLen;
+             // Object-space position (or clip-space + identity matrix for rects);
+             // the vertex shader applies the palette matrix, y flip and z convention.
+-            mBufVbo[mBufVboLen++] = v_arr[i]->x;
+-            mBufVbo[mBufVboLen++] = v_arr[i]->y;
+-            mBufVbo[mBufVboLen++] = v_arr[i]->z;
+-            mBufVbo[mBufVboLen++] = v_arr[i]->w;
+-            mBufVbo[mBufVboLen++] = (float)mtx_slots[i];
++            *out++ = v->x;
++            *out++ = v->y;
++            *out++ = v->z;
++            *out++ = v->w;
++            *out++ = (float)mtx_slots[i];
+ 
+             // Raw RSP texture coordinates: the tile shift/origin/bilerp/size pipeline
+             // runs in the vertex shader via the per-draw uv_transform uniforms, and
+@@ -2322,30 +2398,39 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
+                 if (!usedTextures[t]) {
+                     continue;
+                 }
+-                mBufVbo[mBufVboLen++] = v_arr[i]->u / 32.0f;
+-                mBufVbo[mBufVboLen++] = v_arr[i]->v / 32.0f;
++                *out++ = v->u * (1.0f / 32.0f);
++                *out++ = v->v * (1.0f / 32.0f);
+             }
+ 
+             // Shade is the only combiner source that still varies per vertex: it is
+             // either the vertex color, or (under G_LIGHTING) the raw vertex normal
+             // that the vertex shader turns into a lit color and texgen UVs.
+-            if (usedShade || normals_in_shade) {
++            if (shade) {
+                 if (normals_in_shade) {
+-                    mBufVbo[mBufVboLen++] = (float)v_arr[i]->normal[0];
+-                    mBufVbo[mBufVboLen++] = (float)v_arr[i]->normal[1];
+-                    mBufVbo[mBufVboLen++] = (float)v_arr[i]->normal[2];
++                    *out++ = (float)v->normal[0];
++                    *out++ = (float)v->normal[1];
++                    *out++ = (float)v->normal[2];
+                 } else {
+-                    mBufVbo[mBufVboLen++] = v_arr[i]->color.r / 255.0f;
+-                    mBufVbo[mBufVboLen++] = v_arr[i]->color.g / 255.0f;
+-                    mBufVbo[mBufVboLen++] = v_arr[i]->color.b / 255.0f;
++                    *out++ = v->color.r * kInv255;
++                    *out++ = v->color.g * kInv255;
++                    *out++ = v->color.b * kInv255;
+                 }
+                 if (use_alpha) {
+                     // Raw vertex alpha; the standard-fog "shade alpha = 1.0" override
+                     // is applied in the vertex shader based on the fog mode.
+-                    mBufVbo[mBufVboLen++] = v_arr[i]->color.a / 255.0f;
++                    *out++ = v->color.a * kInv255;
+                 }
+             }
++            mBufVboLen = (size_t)(out - mBufVbo);
++
++            const uint16_t index = (uint16_t)mBatchNumVerts++;
++            idx[i] = index;
++            if (reusable) {
++                mBatchVtxEpoch[slotIdx] = mBatchEpoch;
++                mBatchVtxIndex[slotIdx] = index;
++            }
+         }
++        mBufIdxLen += 3;
+ 
+         if (++mBufVboNumTris == MAX_TRI_BUFFER) {
+             Flush();
+@@ -2601,15 +2686,27 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
+         effective_tile[i] = tile;
+ 
+         if (comb->usedTextures[i]) {
+-            // The mip/indexed variants of a texture live under different cache keys,
+-            // so a mode change must re-run the import even when the tile data didn't change.
+-            if (mRenderingState.mTextures[i] != nullptr &&
+-                ((i == 0 && mRenderingState.mTextures[0]->first.mip_levels != mipExtraLevels) ||
+-                 mRenderingState.mTextures[i]->first.indexed != (palettized[i] ? 1 : 0))) {
++            if (i == 0 && sTexSlot0IsFb) {
++                // A framebuffer is bound to slot 0 (G_SETTIMG_FB: the pause screen's frozen frame, the VisMono and
++                // motion blur effects): there is nothing to import. The mip/palette check below compared it with
++                // the last texture imported, and a mismatch imported a cached texture over the framebuffer: the
++                // pause background showed a random texture.
++                mRdp->textures_changed[0] = false;
++            } else if (mRenderingState.mTextures[i] != nullptr &&
++                       ((i == 0 && mRenderingState.mTextures[0]->first.mip_levels != mipExtraLevels) ||
++                        mRenderingState.mTextures[i]->first.indexed != (palettized[i] ? 1 : 0))) {
++                // The mip/indexed variants of a texture live under different cache keys,
++                // so a mode change must re-run the import even when the tile data didn't change.
+                 mRdp->textures_changed[i] = true;
+             }
+             if (mRdp->textures_changed[i]) {
+                 Flush();
++#if defined(__PROSPERO__) || defined(__PS4__)
++                // a texture decoded and uploaded mid-frame (not one found in the cache): Keep Game Speed leaves it
++                // out of the frame cost; resources it loads on the way count as theirs
++                const double stallBefore = gPs4Stalls.ms;
++                const auto importStart = std::chrono::steady_clock::now();
++#endif
+                 // Only the base texture slot carries a mip chain; masks and
+                 // replacements are always uploaded as single-level textures.
+                 mCurrentMipExtraLevels = (i == 0) ? mipExtraLevels : 0;
+@@ -2624,6 +2721,15 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
+                     ImportTexture(SHADER_FIRST_REPLACEMENT_TEXTURE + i, tile, true);
+                 }
+                 mRdp->textures_changed[i] = false;
++#if defined(__PROSPERO__) || defined(__PS4__)
++                const double importMs =
++                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - importStart).count() -
++                    (gPs4Stalls.ms - stallBefore);
++                if (importMs > 0.25) {
++                    gPs4Stalls.ms += importMs;
++                    gPs4Stalls.textures++;
++                }
++#endif
+             }
+ 
+             uint8_t cms = mRdp->texture_tile[tile].cms;
+@@ -2780,7 +2886,11 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
+     // model-space coefficients computed at vertex-load time (CalculateNormalDir);
+     // a change mid-batch flushes the queued triangles first.
+     if (cc_options & SHADER_OPT(LIGHTING)) {
+-        LightingUniforms lu = {};
++        // Built with its active lights only. The block holds 32 lights (1.8 KB); zeroing all of it, comparing all
++        // of it here and once more in the backend at every triangle state change was ~7% of the PS4's frame. The
++        // shader reads lights[0, num_lights) and the fields after the array, so those are all that is compared
++        // and latched (the backend's copy keeps whatever it had past num_lights: never read).
++        static LightingUniforms lu;
+         int numLights = mRsp->current_num_lights - 1;
+         if (numLights < 0) {
+             numLights = 0;
+@@ -2788,6 +2898,13 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
+         if (numLights > GFX_MAX_GPU_LIGHTS) {
+             numLights = GFX_MAX_GPU_LIGHTS;
+         }
++        constexpr size_t kTailOffset = offsetof(LightingUniforms, ambient);
++        constexpr size_t kTailSize = sizeof(LightingUniforms) - kTailOffset;
++        const size_t litSize = (size_t)numLights * sizeof(lu.lights[0]);
++        char* const luTail = reinterpret_cast<char*>(&lu) + kTailOffset;
++        char* const latchedTail = reinterpret_cast<char*>(&mLatchedLighting) + kTailOffset;
++        memset(lu.lights, 0, litSize);
++        memset(luTail, 0, kTailSize);
+         lu.num_lights = numLights;
+ 
+         const int ambientIdx = mRsp->current_num_lights > 0 ? mRsp->current_num_lights - 1 : 0;
+@@ -2870,11 +2987,12 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
+             }
+         }
+ 
+-        if (memcmp(&lu, &mLatchedLighting, sizeof(LightingUniforms)) != 0) {
++        if (memcmp(lu.lights, mLatchedLighting.lights, litSize) != 0 || memcmp(luTail, latchedTail, kTailSize) != 0) {
+             Flush();
+-            mLatchedLighting = lu;
++            memcpy(mLatchedLighting.lights, lu.lights, litSize);
++            memcpy(latchedTail, luTail, kTailSize);
++            mRapi->SetLightingUniforms(mLatchedLighting);
+         }
+-        mRapi->SetLightingUniforms(lu);
+     }
+ 
+     // Per-draw vertex-pipeline constants: the UV tile transform and clamp bounds
+@@ -3190,6 +3308,8 @@ void Interpreter::GfxDpSetTextureImage(uint32_t format, uint32_t size, uint32_t
+     mRdp->texture_to_load.width = width;
+     mRdp->texture_to_load.tex_flags = texFlags;
+     mRdp->texture_to_load.raw_tex_metadata = rawTexMetdata;
++    // a real texture is on its way into slot 0 again
++    sTexSlot0IsFb = false;
+ }
+ 
+ void Interpreter::GfxDpSetTile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t tmem, uint8_t tile, uint32_t palette,
+@@ -3894,7 +4014,7 @@ void Interpreter::Gfxs2dexBgCopy(F3DuObjBg* bg) {
+ 
+     if ((bool)gfx_check_image_signature((char*)data)) {
+         std::shared_ptr<Fast::Texture> tex = std::static_pointer_cast<Fast::Texture>(
+-            Ship::Context::GetRawInstance()->GetResourceManager()->LoadResourceProcess((char*)data));
++            ResMgr()->LoadResourceProcess((char*)data));
+         texFlags = tex->Flags;
+         rawTexMetadata.width = tex->Width;
+         rawTexMetadata.height = tex->Height;
+@@ -3931,7 +4051,7 @@ void Interpreter::Gfxs2dexBg1cyc(F3DuObjBg* bg) {
+ 
+     if ((bool)gfx_check_image_signature((char*)data)) {
+         std::shared_ptr<Fast::Texture> tex = std::static_pointer_cast<Fast::Texture>(
+-            Ship::Context::GetRawInstance()->GetResourceManager()->LoadResourceProcess((char*)data));
++            ResMgr()->LoadResourceProcess((char*)data));
+         texFlags = tex->Flags;
+         rawTexMetadata.width = tex->Width;
+         rawTexMetadata.height = tex->Height;
+@@ -4079,19 +4199,68 @@ void gfx_copy_framebuffer(int fb_dst_id, int fb_src_id, bool copyOnce, bool* has
+ typedef bool (*GfxOpcodeHandlerFunc)(F3DGfx** gfx);
+ 
+ bool gfx_load_ucode_handler_f3dex2(F3DGfx** cmd) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     gfx->mRsp->fog_mul = 0;
+     gfx->mRsp->fog_offset = 0;
+     return false;
+ }
+ 
++// G_CULLDL, as the RSP runs it: when the bounding vertices just loaded are all outside the same side of the
++// view volume, the display list returns. Upstream left it a no-op (PC SoH draws everything, and a mod's bounds
++// were never tested): on the PS4, where the CPU is the limit, it is counted always and acted on only when
++// gSettings.PS4.CullDL is on (perf report: "culldl skipped/seen").
++
++bool Interpreter::CullDisplayListOutOfView(uint32_t first, uint32_t last) {
++    if (first > last || last >= MAX_VERTICES) {
++        return false;
++    }
++    uint32_t common = 0x3f;
++    for (uint32_t i = first; i <= last && common != 0; i++) {
++        const LoadedVertex& v = mRsp->loaded_vertices[i];
++        // the matrix the vertex shader will use (aspect scale folded in), row-vector convention
++        const float (*m)[4] = mMtxHistory[v.mtx_slot];
++        const float x = v.x * m[0][0] + v.y * m[1][0] + v.z * m[2][0] + v.w * m[3][0];
++        const float y = v.x * m[0][1] + v.y * m[1][1] + v.z * m[2][1] + v.w * m[3][1];
++        const float z = v.x * m[0][2] + v.y * m[1][2] + v.z * m[2][2] + v.w * m[3][2];
++        const float w = v.x * m[0][3] + v.y * m[1][3] + v.z * m[2][3] + v.w * m[3][3];
++        uint32_t code = 0;
++        code |= x < -w ? 1 : 0;
++        code |= x > w ? 2 : 0;
++        code |= y < -w ? 4 : 0;
++        code |= y > w ? 8 : 0;
++        code |= z < -w ? 16 : 0;
++        code |= z > w ? 32 : 0;
++        common &= code;
++    }
++    return common != 0;
++}
++
+ bool gfx_cull_dl_handler_f3dex2(F3DGfx** cmd) {
+-    // TODO:
++    Interpreter* gfx = sGfxRaw;
++    // F3DEX2: vertex indices times two in the low halves of both words
++    const uint32_t first = ((*cmd)->words.w0 & 0xffff) / 2;
++    const uint32_t last = ((*cmd)->words.w1 & 0xffff) / 2;
++    ps5_n_culldl++;
++    if (!gfx->CullDisplayListOutOfView(first, last)) {
++        return false;
++    }
++    ps5_n_culldl_out++;
++    if (!gfx->mCullDisplayLists) {
++        return false;
++    }
++    // as G_ENDDL
++    gfx->mMarkerOn = false;
++    g_exec_stack.ret();
++    return true;
++}
++
++// F3DEX / F3D encode G_CULLDL differently (and OoT does not use them): left as it was
++bool gfx_cull_dl_handler_f3dex(F3DGfx** cmd) {
+     return false;
+ }
+ 
+ bool gfx_marker_handler_otr(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     (*cmd0)++;
+     F3DGfx* cmd = (*cmd0);
+     gfx->mMarkerOn = true;
+@@ -4099,7 +4268,7 @@ bool gfx_marker_handler_otr(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_invalidate_tex_cache_handler_f3dex2(F3DGfx** cmd) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     const uintptr_t texAddr = (*cmd)->words.w1;
+ 
+     if (texAddr == 0) {
+@@ -4128,7 +4297,7 @@ bool gfx_noop_handler_f3dex2(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_mtx_handler_f3dex2(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+     uintptr_t mtxAddr = cmd->words.w1;
+ 
+@@ -4137,7 +4306,7 @@ bool gfx_mtx_handler_f3dex2(F3DGfx** cmd0) {
+ }
+ // Seems to be the same for all other non F3DEX2 microcodes...
+ bool gfx_mtx_handler_f3d(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+     uintptr_t mtxAddr = cmd->words.w1;
+ 
+@@ -4146,10 +4315,10 @@ bool gfx_mtx_handler_f3d(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_mtx_otr_filepath_handler_custom_f3dex2(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+     const char* fileName = (const char*)cmd->words.w1;
+-    const int32_t* mtx = (const int32_t*)Ship::Context::GetRawInstance()->GetResourceManager()->GetResourceRawPointer(
++    const int32_t* mtx = (const int32_t*)ResMgr()->GetResourceRawPointer(
+         (const char*)fileName);
+ 
+     if (mtx != NULL) {
+@@ -4160,10 +4329,10 @@ bool gfx_mtx_otr_filepath_handler_custom_f3dex2(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_mtx_otr_filepath_handler_custom_f3d(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+     const char* fileName = (const char*)cmd->words.w1;
+-    const int32_t* mtx = (const int32_t*)Ship::Context::GetRawInstance()->GetResourceManager()->GetResourceRawPointer(
++    const int32_t* mtx = (const int32_t*)ResMgr()->GetResourceRawPointer(
+         (const char*)fileName);
+ 
+     if (mtx != NULL) {
+@@ -4187,10 +4356,10 @@ bool gfx_mtx_otr_handler_custom_f3dex2(F3DGfx** cmd0) {
+ 
+     const uint64_t hash = ((uint64_t)cmd->words.w0 << 32) + cmd->words.w1;
+     const int32_t* mtx =
+-        (const int32_t*)Ship::Context::GetRawInstance()->GetResourceManager()->GetResourceRawPointer(hash);
++        (const int32_t*)ResMgr()->GetResourceRawPointer(hash);
+ 
+     if (mtx != NULL) {
+-        Interpreter* gfx = mInstance.lock().get();
++        Interpreter* gfx = sGfxRaw;
+         cmd--;
+         gfx->GfxSpMatrix(C0(0, 8) ^ F3DEX2_G_MTX_PUSH, mtx);
+         cmd++;
+@@ -4200,13 +4369,13 @@ bool gfx_mtx_otr_handler_custom_f3dex2(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_mtx_otr_handler_custom_f3d(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     (*cmd0)++;
+     F3DGfx* cmd = *cmd0;
+ 
+     const uint64_t hash = ((uint64_t)cmd->words.w0 << 32) + cmd->words.w1;
+     const int32_t* mtx =
+-        (const int32_t*)Ship::Context::GetRawInstance()->GetResourceManager()->GetResourceRawPointer(hash);
++        (const int32_t*)ResMgr()->GetResourceRawPointer(hash);
+     if (mtx != nullptr) {
+         cmd--;
+         gfx->GfxSpMatrix(C0(16, 8), mtx);
+@@ -4224,7 +4393,7 @@ bool gfx_mtx_otr_handler_custom(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_pop_mtx_handler_f3dex2(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxSpPopMatrix((uint32_t)(cmd->words.w1 / 64));
+@@ -4233,7 +4402,7 @@ bool gfx_pop_mtx_handler_f3dex2(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_pop_mtx_handler_f3d(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxSpPopMatrix(1);
+@@ -4242,7 +4411,7 @@ bool gfx_pop_mtx_handler_f3d(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_movemem_handler_f3dex2(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxSpMovememF3dex2(C0(0, 8), C0(8, 8) * 8, gfx->SegAddr(cmd->words.w1));
+@@ -4251,7 +4420,7 @@ bool gfx_movemem_handler_f3dex2(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_movemem_handler_f3d(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxSpMovememF3d(C0(16, 8), 0, gfx->SegAddr(cmd->words.w1));
+@@ -4260,7 +4429,7 @@ bool gfx_movemem_handler_f3d(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_movemem_handler_otr(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     const uint8_t index = C1(24, 8);
+@@ -4273,10 +4442,10 @@ bool gfx_movemem_handler_otr(F3DGfx** cmd0) {
+ 
+     if (ucode_handler_index == ucode_f3dex2) {
+         gfx->GfxSpMovememF3dex2(index, offset,
+-                                Ship::Context::GetRawInstance()->GetResourceManager()->GetResourceRawPointer(hash));
++                                ResMgr()->GetResourceRawPointer(hash));
+     } else {
+         auto light =
+-            (Fast::LightEntry*)Ship::Context::GetRawInstance()->GetResourceManager()->GetResourceRawPointer(hash);
++            (Fast::LightEntry*)ResMgr()->GetResourceRawPointer(hash);
+         uintptr_t data = (uintptr_t)&light->Ambient;
+         gfx->GfxSpMovememF3d(index, offset, (void*)(data + (hasOffset == 1 ? 0x8 : 0)));
+     }
+@@ -4284,7 +4453,7 @@ bool gfx_movemem_handler_otr(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_push_shader(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+     const char* path = (const char*)gfx->SegAddr(cmd->words.w1);
+ 
+@@ -4314,7 +4483,7 @@ bool gfx_push_shader(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_pop_shader(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     if (!gfx->mShaderStack.empty()) {
+@@ -4325,7 +4494,7 @@ bool gfx_pop_shader(F3DGfx** cmd0) {
+ }
+ 
+ const char* gfx_get_shader(int16_t id) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+ 
+     for (const std::pair<size_t, const char*>& shader : gfx->mShaders) {
+         if (shader.first == id) {
+@@ -4337,7 +4506,7 @@ const char* gfx_get_shader(int16_t id) {
+ }
+ 
+ bool gfx_moveword_handler_f3dex2(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxSpMovewordF3dex2(C0(16, 8), C0(0, 16), cmd->words.w1);
+@@ -4346,7 +4515,7 @@ bool gfx_moveword_handler_f3dex2(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_moveword_handler_f3d(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxSpMovewordF3d(C0(0, 8), C0(8, 16), cmd->words.w1);
+@@ -4355,7 +4524,7 @@ bool gfx_moveword_handler_f3d(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_texture_handler_f3dex2(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxSpTexture(C1(16, 16), C1(0, 16), C0(11, 3), C0(8, 3), C0(1, 7));
+@@ -4365,7 +4534,7 @@ bool gfx_texture_handler_f3dex2(F3DGfx** cmd0) {
+ 
+ // Seems to be the same for all other non F3DEX2 microcodes...
+ bool gfx_texture_handler_f3d(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxSpTexture(C1(16, 16), C1(0, 16), C0(11, 3), C0(8, 3), C0(0, 8));
+@@ -4375,7 +4544,7 @@ bool gfx_texture_handler_f3d(F3DGfx** cmd0) {
+ 
+ // Almost all versions of the microcode have their own version of this opcode
+ bool gfx_vtx_handler_f3dex2(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxSpVertex(C0(12, 8), C0(1, 7) - C0(12, 8), (const F3DVtx*)gfx->SegAddr(cmd->words.w1));
+@@ -4384,7 +4553,7 @@ bool gfx_vtx_handler_f3dex2(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_vtx_handler_f3dex(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+     gfx->GfxSpVertex(C0(10, 6), C0(17, 7), (const F3DVtx*)gfx->SegAddr(cmd->words.w1));
+ 
+@@ -4392,7 +4561,7 @@ bool gfx_vtx_handler_f3dex(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_vtx_handler_f3d(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxSpVertex((C0(0, 16)) / sizeof(F3DVtx), C0(16, 4), (const F3DVtx*)gfx->SegAddr(cmd->words.w1));
+@@ -4401,7 +4570,7 @@ bool gfx_vtx_handler_f3d(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_vtx_hash_handler_custom(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     // Offset added to the start of the vertices
+     const uintptr_t offset = (*cmd0)->words.w1;
+     // This is a two-part display list command, so increment the instruction pointer so we can get the CRC64
+@@ -4417,7 +4586,7 @@ bool gfx_vtx_hash_handler_custom(F3DGfx** cmd0) {
+         gfx->GfxSpVertex(C0(12, 8), C0(1, 7) - C0(12, 8), (F3DVtx*)offset);
+         (*cmd0)++;
+     } else {
+-        F3DVtx* vtx = (F3DVtx*)Ship::Context::GetRawInstance()->GetResourceManager()->GetResourceRawPointer(hash);
++        F3DVtx* vtx = (F3DVtx*)ResMgr()->GetResourceRawPointer(hash);
+ 
+         if (vtx != NULL) {
+             vtx = (F3DVtx*)((char*)vtx + offset);
+@@ -4436,7 +4605,7 @@ bool gfx_vtx_hash_handler_custom(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_vtx_otr_filepath_handler_custom(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+     char* fileName = (char*)cmd->words.w1;
+     (*cmd0)++;
+@@ -4445,7 +4614,7 @@ bool gfx_vtx_otr_filepath_handler_custom(F3DGfx** cmd0) {
+     size_t vtxIdxOff = cmd->words.w1 >> 16;
+     size_t vtxDataOff = cmd->words.w1 & 0xFFFF;
+     F3DVtx* vtx =
+-        (F3DVtx*)Ship::Context::GetRawInstance()->GetResourceManager()->GetResourceRawPointer((const char*)fileName);
++        (F3DVtx*)ResMgr()->GetResourceRawPointer((const char*)fileName);
+     vtx += vtxDataOff;
+ 
+     gfx->GfxSpVertex(vtxCnt, vtxIdxOff, vtx);
+@@ -4456,7 +4625,7 @@ bool gfx_dl_otr_filepath_handler_custom(F3DGfx** cmd0) {
+     F3DGfx* cmd = *cmd0;
+     char* fileName = (char*)cmd->words.w1;
+     F3DGfx* nDL =
+-        (F3DGfx*)Ship::Context::GetRawInstance()->GetResourceManager()->GetResourceRawPointer((const char*)fileName);
++        (F3DGfx*)ResMgr()->GetResourceRawPointer((const char*)fileName);
+ 
+     if (C0(16, 1) == 0 && nDL != nullptr) {
+         g_exec_stack.call(*cmd0, nDL);
+@@ -4477,7 +4646,7 @@ bool gfx_dl_otr_filepath_handler_custom(F3DGfx** cmd0) {
+ 
+ // The original F3D microcode doesn't seem to have this opcode. Glide handles it as part of moveword
+ bool gfx_modify_vtx_handler_f3dex2(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+     gfx->GfxSpModifyVertex(C0(1, 15), C0(16, 8), (uint32_t)cmd->words.w1);
+     return false;
+@@ -4485,7 +4654,7 @@ bool gfx_modify_vtx_handler_f3dex2(F3DGfx** cmd0) {
+ 
+ // F3D, F3DEX, and F3DEX2 do the same thing but F3DEX2 has its own opcode number
+ bool gfx_dl_handler_common(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+     F3DGfx* subGFX = (F3DGfx*)gfx->SegAddr(cmd->words.w1);
+ 
+@@ -4517,13 +4686,13 @@ bool gfx_dl_otr_hash_handler_custom(F3DGfx** cmd0) {
+ 
+         uint64_t hash = ((uint64_t)(*cmd0)->words.w0 << 32) + (*cmd0)->words.w1;
+ 
+-        F3DGfx* gfx = (F3DGfx*)Ship::Context::GetRawInstance()->GetResourceManager()->GetResourceRawPointer(hash);
++        F3DGfx* gfx = (F3DGfx*)ResMgr()->GetResourceRawPointer(hash);
+ 
+         if (gfx != 0) {
+             g_exec_stack.call(cmd, gfx);
+         }
+     } else {
+-        Interpreter* gfx = mInstance.lock().get();
++        Interpreter* gfx = sGfxRaw;
+         assert(0 && "????");
+         (*cmd0) = (F3DGfx*)gfx->SegAddr((*cmd0)->words.w1);
+         return true;
+@@ -4534,7 +4703,7 @@ bool gfx_dl_index_handler(F3DGfx** cmd0) {
+     // Compute seg addr by converting an index value to a offset value
+     // handling 32 vs 64 bit size differences for Gfx
+     // adding 1 to trigger the segaddr flow
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = (*cmd0);
+     uint8_t segNum = (uint8_t)(cmd->words.w1 >> 24);
+     uint32_t index = (uint32_t)(cmd->words.w1 & 0x00FFFFFF);
+@@ -4563,7 +4732,7 @@ bool gfx_pushcd_handler_custom(F3DGfx** cmd0) {
+ // TODO handle special OTR opcodes later...
+ bool gfx_branch_z_otr_handler_f3dex2(F3DGfx** cmd0) {
+     // Push return address
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = (*cmd0);
+ 
+     uint8_t vbidx = (uint8_t)((*cmd0)->words.w0 & 0x00000FFF);
+@@ -4575,7 +4744,7 @@ bool gfx_branch_z_otr_handler_f3dex2(F3DGfx** cmd0) {
+         (gfx->mRsp->extra_geometry_mode & G_EX_ALWAYS_EXECUTE_BRANCH) != 0) {
+         uint64_t hash = ((uint64_t)(*cmd0)->words.w0 << 32) + (*cmd0)->words.w1;
+ 
+-        F3DGfx* gfx = (F3DGfx*)Ship::Context::GetRawInstance()->GetResourceManager()->GetResourceRawPointer(hash);
++        F3DGfx* gfx = (F3DGfx*)ResMgr()->GetResourceRawPointer(hash);
+ 
+         if (gfx != 0) {
+             (*cmd0) = gfx;
+@@ -4588,14 +4757,14 @@ bool gfx_branch_z_otr_handler_f3dex2(F3DGfx** cmd0) {
+ 
+ // F3D, F3DEX, and F3DEX2 do the same thing but F3DEX2 has its own opcode number
+ bool gfx_end_dl_handler_common(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     gfx->mMarkerOn = false;
+     g_exec_stack.ret();
+     return true;
+ }
+ 
+ bool gfx_set_prim_depth_handler_rdp(F3DGfx** cmd) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     uint32_t w1 = (*cmd)->words.w1;
+     gfx->mRdp->prim_depth = (uint16_t)((w1 >> 16) & 0x7FFF); // Mask to 15 bits
+     return false;
+@@ -4603,7 +4772,7 @@ bool gfx_set_prim_depth_handler_rdp(F3DGfx** cmd) {
+ 
+ // Only on F3DEX2
+ bool gfx_geometry_mode_handler_f3dex2(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxSpGeometryMode(~C0(0, 24), (uint32_t)cmd->words.w1);
+@@ -4612,7 +4781,7 @@ bool gfx_geometry_mode_handler_f3dex2(F3DGfx** cmd0) {
+ 
+ // Only on F3DEX and older
+ bool gfx_set_geometry_mode_handler_f3d(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxSpGeometryMode(0, (uint32_t)cmd->words.w1);
+@@ -4621,7 +4790,7 @@ bool gfx_set_geometry_mode_handler_f3d(F3DGfx** cmd0) {
+ 
+ // Only on F3DEX and older
+ bool gfx_clear_geometry_mode_handler_f3d(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxSpGeometryMode((uint32_t)cmd->words.w1, 0);
+@@ -4629,7 +4798,7 @@ bool gfx_clear_geometry_mode_handler_f3d(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_tri1_otr_handler_f3dex2(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+ 
+     F3DGfx* cmd = *cmd0;
+     uint8_t v00 = (uint8_t)(cmd->words.w0 & 0x0000FFFF);
+@@ -4641,7 +4810,7 @@ bool gfx_tri1_otr_handler_f3dex2(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_tri1_handler_f3dex2(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxSpTri1(C0(16, 8) / 2, C0(8, 8) / 2, C0(0, 8) / 2, false);
+@@ -4650,7 +4819,7 @@ bool gfx_tri1_handler_f3dex2(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_tri1_handler_f3dex(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxSpTri1(C1(17, 7), C1(9, 7), C1(1, 7), false);
+@@ -4659,7 +4828,7 @@ bool gfx_tri1_handler_f3dex(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_tri1_handler_f3d(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxSpTri1(C1(16, 8) / 10, C1(8, 8) / 10, C1(0, 8) / 10, false);
+@@ -4669,7 +4838,7 @@ bool gfx_tri1_handler_f3d(F3DGfx** cmd0) {
+ 
+ // F3DEX, and F3DEX2 share a tri2 function, however F3DEX has a different quad function.
+ bool gfx_tri2_handler_f3dex(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxSpTri1(C0(17, 7), C0(9, 7), C0(1, 7), false);
+@@ -4678,7 +4847,7 @@ bool gfx_tri2_handler_f3dex(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_quad_handler_f3dex2(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxSpTri1(C0(16, 8) / 2, C0(8, 8) / 2, C0(0, 8) / 2, false);
+@@ -4687,7 +4856,7 @@ bool gfx_quad_handler_f3dex2(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_quad_handler_f3dex(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxSpTri1(C1(16, 8) / 2, C1(8, 8) / 2, C1(0, 8) / 2, false);
+@@ -4696,7 +4865,7 @@ bool gfx_quad_handler_f3dex(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_othermode_l_handler_f3dex2(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxSpSetOtherMode(31 - C0(8, 8) - C0(0, 8), C0(0, 8) + 1, cmd->words.w1);
+@@ -4705,7 +4874,7 @@ bool gfx_othermode_l_handler_f3dex2(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_othermode_l_handler_f3d(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxSpSetOtherMode(C0(8, 8), C0(0, 8), cmd->words.w1);
+@@ -4714,7 +4883,7 @@ bool gfx_othermode_l_handler_f3d(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_othermode_h_handler_f3dex2(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxSpSetOtherMode(63 - C0(8, 8) - C0(0, 8), C0(0, 8) + 1, (uint64_t)cmd->words.w1 << 32);
+@@ -4724,7 +4893,7 @@ bool gfx_othermode_h_handler_f3dex2(F3DGfx** cmd0) {
+ 
+ // Only on F3DEX and older
+ bool gfx_set_geometry_mode_handler_f3dex(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxSpGeometryMode(0, (uint32_t)cmd->words.w1);
+@@ -4733,7 +4902,7 @@ bool gfx_set_geometry_mode_handler_f3dex(F3DGfx** cmd0) {
+ 
+ // Only on F3DEX and older
+ bool gfx_clear_geometry_mode_handler_f3dex(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxSpGeometryMode((uint32_t)cmd->words.w1, 0);
+@@ -4741,7 +4910,7 @@ bool gfx_clear_geometry_mode_handler_f3dex(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_othermode_h_handler_f3d(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxSpSetOtherMode(C0(8, 8) + 32, C0(0, 8), (uint64_t)cmd->words.w1 << 32);
+@@ -4771,7 +4940,7 @@ static bool IsValidResolvedAddress(uintptr_t addr) {
+ }
+ 
+ bool gfx_set_timg_handler_rdp(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+     uintptr_t i = (uintptr_t)gfx->SegAddr(cmd->words.w1);
+ 
+@@ -4819,7 +4988,7 @@ bool gfx_set_timg_otr_hash_handler_custom(F3DGfx** cmd0) {
+     uint64_t hash = ((uint64_t)(*cmd0)->words.w0 << 32) + (uint64_t)(*cmd0)->words.w1;
+ 
+     const char* fileName =
+-        Ship::Context::GetRawInstance()->GetResourceManager()->GetArchiveManager()->HashToCString(hash);
++        ResMgr()->GetArchiveManager()->HashToCString(hash);
+     uint32_t texFlags = 0;
+     RawTexMetadata rawTexMetadata = {};
+ 
+@@ -4829,8 +4998,8 @@ bool gfx_set_timg_otr_hash_handler_custom(F3DGfx** cmd0) {
+     }
+ 
+     std::shared_ptr<Fast::Texture> texture = std::static_pointer_cast<Fast::Texture>(
+-        Ship::Context::GetRawInstance()->GetResourceManager()->LoadResourceProcess(
+-            Ship::Context::GetRawInstance()->GetResourceManager()->GetArchiveManager()->HashToCString(hash)));
++        ResMgr()->LoadResourceProcess(
++            ResMgr()->GetArchiveManager()->HashToCString(hash)));
+     if (texture != nullptr) {
+         texFlags = texture->Flags;
+         rawTexMetadata.width = texture->Width;
+@@ -4866,7 +5035,7 @@ bool gfx_set_timg_otr_hash_handler_custom(F3DGfx** cmd0) {
+         uint32_t width = C0(0, 12) + 1;
+ 
+         if (tex != NULL) {
+-            Interpreter* gfx = mInstance.lock().get();
++            Interpreter* gfx = sGfxRaw;
+             gfx->GfxDpSetTextureImage(fmt, size, width, fileName, texFlags, rawTexMetadata, tex);
+         }
+     } else {
+@@ -4885,9 +5054,9 @@ bool gfx_set_timg_otr_filepath_handler_custom(F3DGfx** cmd0) {
+     RawTexMetadata rawTexMetadata = {};
+ 
+     std::shared_ptr<Fast::Texture> texture = std::static_pointer_cast<Fast::Texture>(
+-        Ship::Context::GetRawInstance()->GetResourceManager()->LoadResourceProcess(fileName));
++        ResMgr()->LoadResourceProcess(fileName));
+     if (texture != nullptr) {
+-        Interpreter* gfx = mInstance.lock().get();
++        Interpreter* gfx = sGfxRaw;
+         texFlags = texture->Flags;
+         rawTexMetadata.width = texture->Width;
+         rawTexMetadata.height = texture->Height;
+@@ -4910,7 +5079,7 @@ bool gfx_set_timg_otr_filepath_handler_custom(F3DGfx** cmd0) {
+ 
+ // G_SETTIMG_PAL: Expose palette_staging data as a texture source
+ bool gfx_set_timg_pal_handler_custom(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     uint8_t tile = C0(8, 8);
+@@ -4965,7 +5134,7 @@ bool gfx_set_timg_pal_handler_custom(F3DGfx** cmd0) {
+ // draw that shares a texture bitmap with an earlier draw hits the cached GPU
+ // upload baked with the earlier palette content.
+ bool gfx_inval_tex_by_pal_handler_custom(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+     const uint8_t* palAddr = (const uint8_t*)(uintptr_t)cmd->words.w1;
+     if (palAddr != nullptr) {
+@@ -4975,7 +5144,7 @@ bool gfx_inval_tex_by_pal_handler_custom(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_set_strict_decal_handler_custom(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+     gfx->Flush();
+     gfx->mRapi->SetStrictDecal(cmd->words.w1 != 0);
+@@ -4984,7 +5153,7 @@ bool gfx_set_strict_decal_handler_custom(F3DGfx** cmd0) {
+ 
+ bool gfx_set_fb_handler_custom(F3DGfx** cmd0) {
+     F3DGfx* cmd = *cmd0;
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     gfx->Flush();
+ 
+     if (cmd->words.w1) {
+@@ -5000,7 +5169,7 @@ bool gfx_set_fb_handler_custom(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_reset_fb_handler_custom(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     gfx->Flush();
+     gfx->mFbActive = false;
+     gfx->mActiveFrameBuffer = gfx->mFrameBuffers.end();
+@@ -5015,7 +5184,7 @@ bool gfx_reset_fb_handler_custom(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_copy_fb_handler_custom(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+     bool* hasCopiedPtr = (bool*)cmd->words.w1;
+ 
+@@ -5025,7 +5194,7 @@ bool gfx_copy_fb_handler_custom(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_read_fb_handler_custom(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     int32_t width, height;
+@@ -5068,7 +5237,7 @@ bool gfx_read_fb_handler_custom(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_register_blended_texture_handler_custom(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     // Flush incase we are replacing a previous blended texture that hasn't been finialized to the GPU
+@@ -5099,18 +5268,19 @@ bool gfx_register_blended_texture_handler_custom(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_set_timg_fb_handler_custom(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->Flush();
+     gfx->mRapi->SelectTextureFb((uint32_t)cmd->words.w1);
+     gfx->mRdp->textures_changed[0] = false;
+     gfx->mRdp->textures_changed[1] = false;
++    sTexSlot0IsFb = true;
+     return false;
+ }
+ 
+ bool gfx_set_grayscale_handler_custom(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->mRdp->grayscale = cmd->words.w1;
+@@ -5118,7 +5288,7 @@ bool gfx_set_grayscale_handler_custom(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_load_block_handler_rdp(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxDpLoadBlock(C1(24, 3), C0(12, 12), C0(0, 12), C1(12, 12), C1(0, 12));
+@@ -5126,7 +5296,7 @@ bool gfx_load_block_handler_rdp(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_load_block_wide_handler_rdp(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     uint32_t tile = cmd->words.w0 & 0x7;
+@@ -5144,7 +5314,7 @@ bool gfx_load_block_wide_handler_rdp(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_load_tile_handler_rdp(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxDpLoadTile(C1(24, 3), C0(12, 12), C0(0, 12), C1(12, 12), C1(0, 12));
+@@ -5152,7 +5322,7 @@ bool gfx_load_tile_handler_rdp(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_set_tile_handler_rdp(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxDpSetTile(C0(21, 3), C0(19, 2), C0(9, 9), C0(0, 9), C1(24, 3), C1(20, 4), C1(18, 2), C1(14, 4), C1(10, 4),
+@@ -5161,7 +5331,7 @@ bool gfx_set_tile_handler_rdp(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_set_tile_size_handler_rdp(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxDpSetTileSize(C1(24, 3), C0(12, 12), C0(0, 12), C1(12, 12), C1(0, 12));
+@@ -5170,7 +5340,7 @@ bool gfx_set_tile_size_handler_rdp(F3DGfx** cmd0) {
+ 
+ bool gfx_set_tile_size_interp_handler_rdp(F3DGfx** cmd0) {
+     F3DGfx* cmd = *cmd0;
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+ 
+     if (gfx->mInterpolationIndex == gfx->mInterpolationIndexTarget) {
+         int tile = C1(24, 3);
+@@ -5191,7 +5361,7 @@ bool gfx_set_tile_size_interp_handler_rdp(F3DGfx** cmd0) {
+ 
+ bool gfx_set_tile_size_lerp_handler_rdp(F3DGfx** cmd0) {
+     F3DGfx* cmd = *cmd0;
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+ 
+     int tile = C1(24, 3);
+     float coords[8];
+@@ -5214,14 +5384,14 @@ bool gfx_set_tile_size_lerp_handler_rdp(F3DGfx** cmd0) {
+ 
+ bool gfx_set_interpolation_index_target(F3DGfx** cmd0) {
+     F3DGfx* cmd = *cmd0;
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+ 
+     gfx->mInterpolationIndexTarget = cmd->words.w1;
+     return false;
+ }
+ 
+ bool gfx_load_tlut_handler_rdp(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxDpLoadTlut(C1(24, 3), C1(14, 10));
+@@ -5229,7 +5399,7 @@ bool gfx_load_tlut_handler_rdp(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_set_env_color_handler_rdp(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxDpSetEnvColor(C1(24, 8), C1(16, 8), C1(8, 8), C1(0, 8));
+@@ -5237,7 +5407,7 @@ bool gfx_set_env_color_handler_rdp(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_set_prim_color_handler_rdp(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxDpSetPrimColor(C0(8, 8), C0(0, 8), C1(24, 8), C1(16, 8), C1(8, 8), C1(0, 8));
+@@ -5245,7 +5415,7 @@ bool gfx_set_prim_color_handler_rdp(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_set_fog_color_handler_rdp(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxDpSetFogColor(C1(24, 8), C1(16, 8), C1(8, 8), C1(0, 8));
+@@ -5258,7 +5428,7 @@ bool gfx_set_fog_color_handler_rdp(F3DGfx** cmd0) {
+ // applied during texture sampling.
+ // G_SETKEYR: w1 = [wR:12 | cR:8 | sR:8]
+ bool gfx_set_key_r_handler_rdp(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     if (gfx->mBufVboNumTris > 0 &&
+@@ -5272,7 +5442,7 @@ bool gfx_set_key_r_handler_rdp(F3DGfx** cmd0) {
+ 
+ // G_SETKEYGB: w0 = [op:8 | wG:12 | _:4 | wB:12], w1 = [cG:8 | sG:8 | cB:8 | sB:8]
+ bool gfx_set_key_gb_handler_rdp(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     if (gfx->mBufVboNumTris > 0 &&
+@@ -5290,7 +5460,7 @@ bool gfx_set_key_gb_handler_rdp(F3DGfx** cmd0) {
+ // G_SETCONVERT: w0 = [op:8 | k0:9 | k1:9 | k2_hi:4], w1 = [k2_lo:5 | k3:9 | k4:9 | k5:9]
+ // K0..K5 are signed 9-bit values; sign-extend after decoding.
+ bool gfx_set_convert_handler_rdp(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     // K4/K5 feed the combiner uniforms; conservatively flush before changing them
+@@ -5308,7 +5478,7 @@ bool gfx_set_convert_handler_rdp(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_set_blend_color_handler_rdp(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxDpSetBlendColor(C1(24, 8), C1(16, 8), C1(8, 8), C1(0, 8));
+@@ -5316,7 +5486,7 @@ bool gfx_set_blend_color_handler_rdp(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_set_fill_color_handler_rdp(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxDpSetFillColor((uint32_t)cmd->words.w1);
+@@ -5324,7 +5494,7 @@ bool gfx_set_fill_color_handler_rdp(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_set_intensity_handler_custom(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxDpSetGrayscaleColor(C1(24, 8), C1(16, 8), C1(8, 8), C1(0, 8));
+@@ -5332,7 +5502,7 @@ bool gfx_set_intensity_handler_custom(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_set_combine_handler_rdp(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+ 
+     gfx->GfxDpSetCombineMode(
+@@ -5342,7 +5512,7 @@ bool gfx_set_combine_handler_rdp(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_tex_rect_and_flip_handler_rdp(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+     int8_t opcode = (int8_t)(cmd->words.w0 >> 24);
+     int32_t lrx, lry, tile, ulx, uly;
+@@ -5368,7 +5538,7 @@ bool gfx_tex_rect_and_flip_handler_rdp(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_tex_rect_wide_handler_custom(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+     int8_t opcode = (int8_t)(cmd->words.w0 >> 24);
+     int32_t lrx, lry, tile, ulx, uly;
+@@ -5392,7 +5562,7 @@ bool gfx_tex_rect_wide_handler_custom(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_image_rect_handler_custom(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *cmd0;
+     int16_t tile, iw, ih;
+     int16_t x0, y0, s0, t0;
+@@ -5416,7 +5586,7 @@ bool gfx_image_rect_handler_custom(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_fill_rect_handler_rdp(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *(cmd0);
+ 
+     gfx->GfxDpFillRectangle(C1(12, 12), C1(0, 12), C0(12, 12), C0(0, 12));
+@@ -5424,7 +5594,7 @@ bool gfx_fill_rect_handler_rdp(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_fill_wide_rect_handler_custom(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *(cmd0);
+     int32_t lrx, lry, ulx, uly;
+ 
+@@ -5439,7 +5609,7 @@ bool gfx_fill_wide_rect_handler_custom(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_SetScissor_handler_rdp(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *(cmd0);
+ 
+     gfx->GfxDpSetScissor(C1(24, 2), C0(12, 12), C0(0, 12), C1(12, 12), C1(0, 12));
+@@ -5447,7 +5617,7 @@ bool gfx_SetScissor_handler_rdp(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_set_z_img_handler_rdp(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *(cmd0);
+ 
+     gfx->GfxDpSetZImage(gfx->SegAddr(cmd->words.w1));
+@@ -5455,7 +5625,7 @@ bool gfx_set_z_img_handler_rdp(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_set_c_img_handler_rdp(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *(cmd0);
+ 
+     gfx->GfxDpSetColorImage(C0(21, 3), C0(19, 2), C0(0, 11), gfx->SegAddr(cmd->words.w1));
+@@ -5463,7 +5633,7 @@ bool gfx_set_c_img_handler_rdp(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_rdp_set_other_mode_rdp(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *(cmd0);
+ 
+     gfx->GfxDpSetOtherMode(C0(0, 24), (uint32_t)cmd->words.w1);
+@@ -5471,7 +5641,7 @@ bool gfx_rdp_set_other_mode_rdp(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_bg_copy_handler_s2dex(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *(cmd0);
+ 
+     if (!gfx->mMarkerOn) {
+@@ -5481,7 +5651,7 @@ bool gfx_bg_copy_handler_s2dex(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_bg_1cyc_handler_s2dex(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *(cmd0);
+ 
+     gfx->Gfxs2dexBg1cyc((F3DuObjBg*)cmd->words.w1);
+@@ -5489,7 +5659,7 @@ bool gfx_bg_1cyc_handler_s2dex(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_obj_rectangle_handler_s2dex(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *(cmd0);
+ 
+     if (!gfx->mMarkerOn) {
+@@ -5499,7 +5669,7 @@ bool gfx_obj_rectangle_handler_s2dex(F3DGfx** cmd0) {
+ }
+ 
+ bool gfx_extra_geometry_mode_handler_custom(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     F3DGfx* cmd = *(cmd0);
+ 
+     gfx->GfxSpExtraGeometryMode(~C0(0, 24), (uint32_t)cmd->words.w1);
+@@ -5514,28 +5684,59 @@ bool gfx_spnoop_command_handler_f3dex2(F3DGfx** cmd0) {
+     return false;
+ }
+ 
++// Commands that leave every input of GfxSpTri1's cached triangle state (sTriCache) alone, so the triangles after them
++// take its short path: the triangle commands themselves; vertex loads (the matrix reaches the GPU per vertex through
++// the matrix history, and GfxSpVertex bumps sTriStateGen itself when it recomputes the light coefficients the
++// lighting uniforms are made of); matrix loads and pops (they only mark the lights changed, which the next vertex
++// load acts on, as just said); display-list calls, returns and branches, G_CULLDL; and the RDP syncs and no-ops.
++// Every other command bumps the generation. Before, every non-triangle command did: a texture-pack mesh (one G_VTX
++// every ~15 triangles, one G_MTX per limb) took the full path, with its uniform rebuild and compares, after each.
++static constexpr bool IsTriStateNeutral(GfxOpcodeHandlerFunc fn) {
++    return fn == gfx_tri1_otr_handler_f3dex2 || fn == gfx_tri1_handler_f3dex2 || fn == gfx_tri1_handler_f3dex ||
++           fn == gfx_tri1_handler_f3d || fn == gfx_tri2_handler_f3dex || fn == gfx_quad_handler_f3dex2 ||
++           fn == gfx_quad_handler_f3dex || fn == gfx_vtx_handler_f3dex2 || fn == gfx_vtx_handler_f3dex ||
++           fn == gfx_vtx_handler_f3d || fn == gfx_vtx_hash_handler_custom || fn == gfx_vtx_otr_filepath_handler_custom ||
++           fn == gfx_mtx_handler_f3dex2 || fn == gfx_mtx_handler_f3d || fn == gfx_mtx_otr_filepath_handler_custom ||
++           fn == gfx_mtx_otr_handler_custom || fn == gfx_pop_mtx_handler_f3dex2 || fn == gfx_pop_mtx_handler_f3d ||
++           fn == gfx_dl_handler_common || fn == gfx_end_dl_handler_common || fn == gfx_dl_otr_hash_handler_custom ||
++           fn == gfx_dl_otr_filepath_handler_custom || fn == gfx_dl_index_handler ||
++           fn == gfx_branch_z_otr_handler_f3dex2 || fn == gfx_cull_dl_handler_f3dex2 || fn == gfx_cull_dl_handler_f3dex ||
++           fn == gfx_stubbed_command_handler || fn == gfx_noop_handler_f3dex2 || fn == gfx_spnoop_command_handler_f3dex2;
++}
++
+ class UcodeHandler {
+   public:
+     inline constexpr UcodeHandler(
+         std::initializer_list<std::pair<int8_t, std::pair<const char*, GfxOpcodeHandlerFunc>>> initializer) {
+         std::fill(std::begin(mHandlers), std::end(mHandlers),
+                   std::pair<const char*, GfxOpcodeHandlerFunc>(nullptr, nullptr));
++        std::fill(std::begin(mTriStateNeutral), std::end(mTriStateNeutral), false);
+ 
+         for (const auto& [opcode, handler] : initializer) {
+             mHandlers[static_cast<uint8_t>(opcode)] = handler;
++            mTriStateNeutral[static_cast<uint8_t>(opcode)] = IsTriStateNeutral(handler.second);
+         }
+     }
+ 
+-    inline bool contains(int8_t opcode) const {
++    constexpr bool contains(int8_t opcode) const {
+         return mHandlers[static_cast<uint8_t>(opcode)].first != nullptr;
+     }
+ 
+-    inline std::pair<const char*, GfxOpcodeHandlerFunc> at(int8_t opcode) const {
++    constexpr std::pair<const char*, GfxOpcodeHandlerFunc> at(int8_t opcode) const {
+         return mHandlers[static_cast<uint8_t>(opcode)];
+     }
+ 
++    constexpr GfxOpcodeHandlerFunc handler(int8_t opcode) const {
++        return mHandlers[static_cast<uint8_t>(opcode)].second;
++    }
++
++    constexpr bool keepsTriState(int8_t opcode) const {
++        return mTriStateNeutral[static_cast<uint8_t>(opcode)];
++    }
++
+   private:
+     std::pair<const char*, GfxOpcodeHandlerFunc> mHandlers[std::numeric_limits<uint8_t>::max() + 1];
++    bool mTriStateNeutral[std::numeric_limits<uint8_t>::max() + 1];
+ };
+ 
+ static constexpr UcodeHandler rdpHandlers = {
+@@ -5640,7 +5841,7 @@ static constexpr UcodeHandler f3dex2Handlers = {
+ 
+ static constexpr UcodeHandler f3dexHandlers = {
+     { F3DEX_G_NOOP, { "G_NOOP", gfx_noop_handler_f3dex2 } },
+-    { F3DEX_G_CULLDL, { "G_CULLDL", gfx_cull_dl_handler_f3dex2 } },
++    { F3DEX_G_CULLDL, { "G_CULLDL", gfx_cull_dl_handler_f3dex } },
+     { F3DEX_G_MTX, { "G_MTX", gfx_mtx_handler_f3d } },
+     { F3DEX_G_POPMTX, { "G_POPMTX", gfx_pop_mtx_handler_f3d } },
+     { F3DEX_G_MOVEMEM, { "G_POPMEM", gfx_movemem_handler_f3d } },
+@@ -5663,7 +5864,7 @@ static constexpr UcodeHandler f3dexHandlers = {
+ 
+ static constexpr UcodeHandler f3dHandlers = {
+     { F3DEX_G_NOOP, { "G_NOOP", gfx_noop_handler_f3dex2 } },
+-    { F3DEX_G_CULLDL, { "G_CULLDL", gfx_cull_dl_handler_f3dex2 } },
++    { F3DEX_G_CULLDL, { "G_CULLDL", gfx_cull_dl_handler_f3dex } },
+     { F3DEX_G_MTX, { "G_MTX", gfx_mtx_handler_f3d } },
+     { F3DEX_G_POPMTX, { "G_POPMTX", gfx_pop_mtx_handler_f3d } },
+     { F3DEX_G_MOVEMEM, { "G_POPMEM", gfx_movemem_handler_f3d } },
+@@ -5704,6 +5905,33 @@ static constexpr std::array ucode_handlers = {
+     &s2dexHandlers,  // ucode_s2dex
+ };
+ 
++// gfx_step's dispatch, per ucode: the handler of every opcode in the order gfx_step looks them up (the OTR
++// commands, the RDP ones, then the ucode's own) with its flags, so a command costs one table load.
++struct GfxDispatch {
++    static constexpr uint8_t kTriStateNeutral = 1, kOtr = 2;
++    GfxOpcodeHandlerFunc fn[256];
++    uint8_t flags[256];
++    constexpr GfxDispatch(const UcodeHandler& ucode) : fn{}, flags{} {
++        for (int op = 0; op < 256; op++) {
++            const int8_t o = static_cast<int8_t>(op);
++            const UcodeHandler* t = otrHandlers.contains(o)   ? &otrHandlers
++                                    : rdpHandlers.contains(o) ? &rdpHandlers
++                                    : ucode.contains(o)       ? &ucode
++                                                              : nullptr;
++            if (t != nullptr) {
++                fn[op] = t->handler(o);
++                flags[op] = (t->keepsTriState(o) ? kTriStateNeutral : 0) | (t == &otrHandlers ? kOtr : 0);
++            }
++        }
++    }
++};
++
++static constexpr GfxDispatch gfxDispatch[] = {
++    GfxDispatch(*ucode_handlers[0]), GfxDispatch(*ucode_handlers[1]), GfxDispatch(*ucode_handlers[2]),
++    GfxDispatch(*ucode_handlers[3]), GfxDispatch(*ucode_handlers[4]), GfxDispatch(*ucode_handlers[5]),
++};
++static_assert(std::size(gfxDispatch) == ucode_handlers.size(), "one dispatch table per ucode");
++
+ const char* GfxGetOpcodeName(int8_t opcode) {
+     if (otrHandlers.contains(opcode)) {
+         return otrHandlers.at(opcode).first;
+@@ -5732,7 +5960,7 @@ const char* GfxGetOpcodeName(int8_t opcode) {
+ static void gfx_set_ucode_handler(UcodeHandlers ucode) {
+     // Loaded ucode must be in range of the supported ucode_handlers
+     assert(ucode < ucode_max);
+-    Interpreter* gfx = mInstance.lock().get();
++    Interpreter* gfx = sGfxRaw;
+     ucode_handler_index = ucode;
+ 
+     // Reset some RSP state values upon ucode load to deal with hardware quirks discovered by emulators
+@@ -5776,25 +6004,71 @@ static void gfx_step() {
+         // Instead of having a handler for each ucode for switching ucode, just check for it early and return.
+     }
+ 
+-    {
+-        // Any command but a triangle command may change the state GfxSpTri1 caches
+-        GfxOpcodeHandlerFunc fn = nullptr;
+-        if (otrHandlers.contains(opcode)) {
+-            fn = otrHandlers.at(opcode).second;
+-        } else if (rdpHandlers.contains(opcode)) {
+-            fn = rdpHandlers.at(opcode).second;
+-        } else if (ucode_handler_index < ucode_handlers.size() &&
+-                   ucode_handlers[ucode_handler_index]->contains(opcode)) {
+-            fn = ucode_handlers[ucode_handler_index]->at(opcode).second;
+-        }
+-        if (fn != gfx_tri1_otr_handler_f3dex2 && fn != gfx_tri1_handler_f3dex2 && fn != gfx_tri1_handler_f3dex &&
+-            fn != gfx_tri1_handler_f3d && fn != gfx_tri2_handler_f3dex && fn != gfx_quad_handler_f3dex2 &&
+-            fn != gfx_quad_handler_f3dex) {
++    if (ucode_handler_index < std::size(gfxDispatch)) {
++        // One table load per command (it was up to six), the neutral-command test from the same entry
++        const GfxDispatch& dispatch = gfxDispatch[ucode_handler_index];
++        const GfxOpcodeHandlerFunc fn = dispatch.fn[static_cast<uint8_t>(opcode)];
++        const uint8_t flags = dispatch.flags[static_cast<uint8_t>(opcode)];
++        if (!(flags & GfxDispatch::kTriStateNeutral)) {
+             sTriStateGen++;
+         }
++        if (fn == nullptr) {
++            SPDLOG_CRITICAL("Unhandled OP code: 0x{:X}, for loaded ucode: {}", (uint8_t)opcode,
++                            (uint32_t)ucode_handler_index);
++            ++cmd;
++            return;
++        }
++        if (flags & GfxDispatch::kOtr) {
++            // OTR filepath handlers expect w1 to be a valid string pointer.
++            // Guard against null or N64-segment addresses that would crash in strlen/strncmp.
++            if (opcode == OTR_G_VTX_OTR_FILEPATH || opcode == OTR_G_SETTIMG_OTR_FILEPATH ||
++                opcode == OTR_G_DL_OTR_FILEPATH || opcode == OTR_G_PUSHCD || opcode == OTR_G_MTX_OTR_FILEPATH) {
++                uintptr_t w1 = (uintptr_t)cmd->words.w1;
++                if (w1 < 0x10000
++#if UINTPTR_MAX > 0xFFFFFFFFu
++                    // On 64-bit: filter kernel/sentinel addresses.
++                    || w1 > 0x0000FFFFFFFFFFFFull
++#endif
++                ) {
++                    ++g_exec_stack.currCmd();
++                    return;
++                }
++            }
++        }
++        if (fn(&cmd)) {
++            return;
++        }
++        ++cmd;
++        return;
+     }
+ 
++    // An invalid ucode index: the tables one by one, as before (OTR and RDP commands still run)
++    const UcodeHandler* table = nullptr;
+     if (otrHandlers.contains(opcode)) {
++        table = &otrHandlers;
++    } else if (rdpHandlers.contains(opcode)) {
++        table = &rdpHandlers;
++    } else if (ucode_handler_index < ucode_handlers.size()) {
++        if (ucode_handlers[ucode_handler_index]->contains(opcode)) {
++            table = ucode_handlers[ucode_handler_index];
++        } else {
++            SPDLOG_CRITICAL("Unhandled OP code: 0x{:X}, for loaded ucode: {}", (uint8_t)opcode,
++                            (uint32_t)ucode_handler_index);
++        }
++    } else {
++        SPDLOG_CRITICAL("Unhandled OP code: 0x{:X}, invalid ucode: {}", (uint8_t)opcode, (uint32_t)ucode_handler_index);
++    }
++
++    // Any command but the neutral ones (IsTriStateNeutral) may change the state GfxSpTri1 caches
++    if (table == nullptr || !table->keepsTriState(opcode)) {
++        sTriStateGen++;
++    }
++    if (table == nullptr) {
++        ++cmd;
++        return;
++    }
++
++    if (table == &otrHandlers) {
+         // OTR filepath handlers expect w1 to be a valid string pointer.
+         // Guard against null or N64-segment addresses that would crash in strlen/strncmp.
+         if (opcode == OTR_G_VTX_OTR_FILEPATH || opcode == OTR_G_SETTIMG_OTR_FILEPATH ||
+@@ -5810,24 +6084,9 @@ static void gfx_step() {
+                 return;
+             }
+         }
+-        if (otrHandlers.at(opcode).second(&cmd)) {
+-            return;
+-        }
+-    } else if (rdpHandlers.contains(opcode)) {
+-        if (rdpHandlers.at(opcode).second(&cmd)) {
+-            return;
+-        }
+-    } else if (ucode_handler_index < ucode_handlers.size()) {
+-        if (ucode_handlers[ucode_handler_index]->contains(opcode)) {
+-            if (ucode_handlers[ucode_handler_index]->at(opcode).second(&cmd)) {
+-                return;
+-            }
+-        } else {
+-            SPDLOG_CRITICAL("Unhandled OP code: 0x{:X}, for loaded ucode: {}", (uint8_t)opcode,
+-                            (uint32_t)ucode_handler_index);
+-        }
+-    } else {
+-        SPDLOG_CRITICAL("Unhandled OP code: 0x{:X}, invalid ucode: {}", (uint8_t)opcode, (uint32_t)ucode_handler_index);
++    }
++    if (table->handler(opcode)(&cmd)) {
++        return;
+     }
+ 
+     ++cmd;
+@@ -6050,6 +6309,9 @@ void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_r
+ 
+     mCurMtxReplacements = &mtx_replacements;
+     mCurDlReplacements = &dl_replacements;
++#if defined(__PROSPERO__) || defined(__PS4__)
++    mCullDisplayLists = Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger("gSettings.PS4.CullDL", 0);
++#endif
+ 
+     mRapi->UpdateFramebufferParameters(0, mGfxCurrentWindowDimensions.width, mGfxCurrentWindowDimensions.height, 1,
+                                        false, true, true, !mRendersToFb);
+@@ -6060,12 +6322,18 @@ void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_r
+     mRenderingState.viewport = {};
+     mRenderingState.scissor = {};
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     const auto ps5_i0 = std::chrono::steady_clock::now();
+ #endif
+     auto dbg = mGfxDebugger;
++    sResMgr = Ship::Context::GetRawInstance()->GetResourceManager().get();
+     g_exec_stack.start((F3DGfx*)commands);
+-    while (!g_exec_stack.cmd_stack.empty()) {
++    // The debugger is switched on and off from the menus, between frames: tested once a frame, not per command
++    const bool debugging = dbg->IsDebugging();
++    while (!debugging && !g_exec_stack.cmd_stack.empty()) {
++        gfx_step();
++    }
++    while (debugging && !g_exec_stack.cmd_stack.empty()) {
+         auto cmd = g_exec_stack.cmd_stack.top();
+ 
+         if (dbg->IsDebugging()) {
+@@ -6086,7 +6354,7 @@ void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_r
+     }
+ 
+     Flush();
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     ps5_t_interp += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - ps5_i0).count();
+ #endif
+     mGfxFrameBuffer = 0;
+@@ -6265,7 +6533,7 @@ int32_t gfx_check_image_signature(const char* imgData) {
+     }
+ #endif
+ 
+-    return Ship::Context::GetRawInstance()->GetResourceManager()->OtrSignatureCheck(imgData);
++    return ResMgr()->OtrSignatureCheck(imgData);
+ }
+ 
+ void Interpreter::RegisterBlendedTexture(const char* name, uint8_t* mask, uint8_t* replacement) {
+@@ -6275,7 +6543,7 @@ void Interpreter::RegisterBlendedTexture(const char* name, uint8_t* mask, uint8_
+ 
+     if (gfx_check_image_signature(reinterpret_cast<char*>(replacement))) {
+         Fast::Texture* tex = std::static_pointer_cast<Fast::Texture>(
+-                                 Ship::Context::GetRawInstance()->GetResourceManager()->LoadResourceProcess(
++                                 ResMgr()->LoadResourceProcess(
+                                      reinterpret_cast<char*>(replacement)))
+                                  .get();
+ 
+@@ -6424,28 +6692,28 @@ void gfx_cc_get_features(uint64_t shader_id0, uint64_t shader_id1, struct CCFeat
+ 
+ extern "C" int gfx_create_framebuffer(uint32_t width, uint32_t height, uint32_t native_width, uint32_t native_height,
+                                       uint8_t resize, bool forceFixedAspect) {
+-    return Fast::mInstance.lock().get()->CreateFrameBuffer(width, height, native_width, native_height, resize,
++    return Fast::sGfxRaw->CreateFrameBuffer(width, height, native_width, native_height, resize,
+                                                            forceFixedAspect);
+ }
+ 
+ extern "C" void gfx_texture_cache_clear() {
+-    Fast::mInstance.lock().get()->TextureCacheClear();
++    Fast::sGfxRaw->TextureCacheClear();
+ }
+ 
+ extern "C" void gfx_shader_cache_clear() {
+-    auto instance = Fast::mInstance.lock().get();
++    auto instance = Fast::sGfxRaw;
+     instance->Flush();
+     instance->mColorCombinerPool.clear();
+-    instance->mPrevCombiner = Fast::mInstance.lock().get()->mColorCombinerPool.end();
++    instance->mPrevCombiner = Fast::sGfxRaw->mColorCombinerPool.end();
+     instance->mPendingCombiner = nullptr;
+     instance->mRenderingState.mShaderProgram = nullptr;
+     instance->mRapi->ClearShaderCache();
+ }
+ 
+ extern "C" void gfx_register_fb_texture(const void* cpuAddr, int fbId) {
+-    Fast::mInstance.lock().get()->RegisterFbTexture(cpuAddr, fbId);
++    Fast::sGfxRaw->RegisterFbTexture(cpuAddr, fbId);
+ }
+ 
+ extern "C" void gfx_unregister_fb_texture(const void* cpuAddr) {
+-    Fast::mInstance.lock().get()->UnregisterFbTexture(cpuAddr);
++    Fast::sGfxRaw->UnregisterFbTexture(cpuAddr);
+ }
+diff --git a/src/ship/Context.cpp b/src/ship/Context.cpp
+index 9f186b9..a5c7d40 100644
+--- a/src/ship/Context.cpp
++++ b/src/ship/Context.cpp
+@@ -29,7 +29,7 @@
+ #include <pwd.h>
+ #endif
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+ extern "C" const char* ps5_data_dir(void);
+ #endif
+ 
+@@ -188,7 +188,7 @@ bool Context::InitLogging(spdlog::level::level_enum debugBuildLogLevel,
+         mLogger = std::make_shared<spdlog::async_logger>(GetName(), sinks.begin(), sinks.end(), mLogThreadPool,
+                                                          spdlog::async_overflow_policy::block);
+         GetLogger()->set_level(releaseBuildLogLevel);
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+         // PlayStation 5: a flush is a slow write; errors at once, the rest every two seconds
+         GetLogger()->flush_on(spdlog::level::err);
+         spdlog::flush_every(std::chrono::seconds(2));
+@@ -491,7 +491,7 @@ std::string Context::GetShortName() const {
+ }
+ 
+ std::string Context::GetAppBundlePath() {
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     // PlayStation 5: the title's own folder, read-write, is all a title sees
+     return "/app0";
+ #endif
+@@ -559,7 +559,7 @@ std::string Context::GetAppBundlePath() {
+ }
+ 
+ std::string Context::GetAppDirectoryPath(const std::string& appName) {
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     // PlayStation 5: settings, saves, logs, mods and oot.o2r, in the data folder
+     // outside the title's own (ps5/src/startup.c), so a reinstall keeps them
+     return ps5_data_dir();
+@@ -633,7 +633,7 @@ std::string Context::LocateFileAcrossAppDirs(const std::string& path, const std:
+     if (std::filesystem::exists(fpath)) {
+         return fpath;
+     }
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     // PlayStation 5: a title has no working directory ("./file" is an invalid
+     // argument to stat, not a missing file): where the file would be made
+     return GetPathRelativeToAppDirectory(path, appName);
+diff --git a/src/ship/controller/controldevice/controller/mapping/sdl/SDLAxisDirectionToAnyMapping.cpp b/src/ship/controller/controldevice/controller/mapping/sdl/SDLAxisDirectionToAnyMapping.cpp
+index 5c6c71d..2bce8e1 100644
+--- a/src/ship/controller/controldevice/controller/mapping/sdl/SDLAxisDirectionToAnyMapping.cpp
++++ b/src/ship/controller/controldevice/controller/mapping/sdl/SDLAxisDirectionToAnyMapping.cpp
+@@ -3,7 +3,7 @@
+ #include "ship/utils/StringHelper.h"
+ #include "ship/window/gui/IconsFontAwesome4.h"
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+ #define SDL_PS5_NAME(ps5, other) ps5
+ #else
+ #define SDL_PS5_NAME(ps5, other) other
+diff --git a/src/ship/controller/controldevice/controller/mapping/sdl/SDLButtonToAnyMapping.cpp b/src/ship/controller/controldevice/controller/mapping/sdl/SDLButtonToAnyMapping.cpp
+index cb8e7e5..c880e91 100644
+--- a/src/ship/controller/controldevice/controller/mapping/sdl/SDLButtonToAnyMapping.cpp
++++ b/src/ship/controller/controldevice/controller/mapping/sdl/SDLButtonToAnyMapping.cpp
+@@ -13,7 +13,7 @@ SDLButtonToAnyMapping::~SDLButtonToAnyMapping() {
+ }
+ 
+ std::string SDLButtonToAnyMapping::GetPhysicalInputName() {
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     // PlayStation 5: the DualSense's own names (the touch pad's click is SDL "back")
+     switch (mControllerButton) {
+         case SDL_CONTROLLER_BUTTON_A:
+diff --git a/src/ship/resource/ResourceManager.cpp b/src/ship/resource/ResourceManager.cpp
+index c62ee72..8ad7e42 100644
+--- a/src/ship/resource/ResourceManager.cpp
++++ b/src/ship/resource/ResourceManager.cpp
+@@ -3,14 +3,282 @@
+ #include "ship/resource/File.h"
+ #include "ship/resource/archive/Archive.h"
+ #include <algorithm>
++#include <cstring>
+ #include <thread>
+ #include "ship/utils/StringHelper.h"
+ #include "ship/utils/Utils.h"
+ #include "ship/config/ConsoleVariable.h"
+ #include "ship/Context.h"
++#include "ship/utils/Ps4Stalls.h"
++#include <chrono>
+ 
+ namespace Ship {
+ 
++namespace {
++// The renderer and the game ask for the same resources by name or hash every frame: thousands of times a
++// frame with a texture pack. Each ask built two or three identifier strings, probed the cache two to four
++// times under its mutex, and went through a promise and a shared future (their allocations, mutex and
++// condition variable): about a fifth of the PS4's game thread in Hyrule Field. A memo per thread answers
++// repeats by the name's text or the hash, holding the resource; it starts over when the cache unloads or
++// replaces a resource (mCacheGeneration), and a resource marked dirty is a miss (reloaded as before).
++// Misses are not remembered: a resource may appear later (CacheExternalResource, a mod).
++//
++// 01.05: two entries a set, 8192 sets (it was one entry in each of 4096 slots). Hyrule Field with a texture pack
++// asks for a couple of thousand names a frame: one slot each left about a third of them sharing a slot with
++// another, both missing every frame, and a missed name takes the cache's slow path (an identifier string, the
++// mutex, the cache's own map).
++constexpr size_t kMemoSets = 8192; // a power of two
++struct ResourceMemo {
++    uint32_t generation = 0;
++    struct ByName {
++        uint64_t hash = 0;
++        std::string name;
++        std::shared_ptr<IResource> resource;
++    } names[kMemoSets * 2];
++    struct ByCrc {
++        uint64_t crc = 0;
++        std::shared_ptr<IResource> resource;
++    } crcs[kMemoSets * 2];
++    // By the address of the name: display lists ask with the same string pointer every frame, and hashing the text
++    // a byte at a time (FNV-1a: a 64-bit multiply per character, ~70 characters a path) was ~4% of the PS4's frame
++    // with a texture pack. The entry names a names[] entry; a hit still compares the text (the memory at an address
++    // can hold another path later), which costs a fraction of the hash.
++    struct ByPtr {
++        const char* ptr = nullptr;
++        uint32_t name = 0; // names[] index + 1; 0: empty
++    } ptrs[kMemoSets * 2];
++    // per set, the entry a new name (bit 0), crc (bit 1) or address (bit 2) replaces when both are taken: the one
++    // not filled last, so two that share a set both stay
++    uint8_t victim[kMemoSets] = {};
++    std::shared_ptr<IResource> scratch; // a result not kept (the cache changed during its load)
++};
++
++inline size_t MemoPtrSet(const char* name) {
++    const uintptr_t p = (uintptr_t)name;
++    return (size_t)((p >> 3) ^ (p >> 16) ^ (p >> 29)) & (kMemoSets - 1);
++}
++
++// Which of a set's two entries to fill: the one already holding this key, else an empty one, else the one the set
++// did not fill last.
++template <typename Same, typename Empty>
++inline size_t MemoFillWay(ResourceMemo& memo, size_t set, uint8_t bit, Same same, Empty empty) {
++    size_t way;
++    if (same(0)) {
++        way = 0;
++    } else if (same(1)) {
++        way = 1;
++    } else if (empty(0)) {
++        way = 0;
++    } else if (empty(1)) {
++        way = 1;
++    } else {
++        way = (memo.victim[set] & bit) ? 1 : 0;
++    }
++    // the other one goes next
++    if (way == 0) {
++        memo.victim[set] |= bit;
++    } else {
++        memo.victim[set] &= (uint8_t)~bit;
++    }
++    return way;
++}
++
++inline void MemoRememberPtr(ResourceMemo& memo, size_t ptrSet, const char* name, uint32_t nameIndex) {
++    auto* ways = &memo.ptrs[ptrSet * 2];
++    const size_t way = MemoFillWay(
++        memo, ptrSet, 4, [&](size_t w) { return ways[w].ptr == name; }, [&](size_t w) { return ways[w].name == 0; });
++    ways[way] = { name, nameIndex + 1 };
++}
++
++ResourceMemo& ThreadMemo(uint32_t generation) {
++    static thread_local ResourceMemo* tMemo = nullptr;
++    if (tMemo == nullptr) {
++        tMemo = new ResourceMemo();
++    }
++    if (tMemo->generation != generation) {
++        // generation first: a resource destroyed here may look others up (and must not clear again)
++        tMemo->generation = generation;
++        for (auto& e : tMemo->names) {
++            e.hash = 0;
++            std::shared_ptr<IResource> drop = std::move(e.resource);
++        }
++        for (auto& e : tMemo->crcs) {
++            e.crc = 0;
++            std::shared_ptr<IResource> drop = std::move(e.resource);
++        }
++        for (auto& e : tMemo->ptrs) {
++            e.ptr = nullptr;
++            e.name = 0;
++        }
++        std::shared_ptr<IResource> drop = std::move(tMemo->scratch);
++    }
++    return *tMemo;
++}
++
++// The name's hash for names[]: eight characters a step (it was a 64-bit multiply per character, ~70 a path; the
++// game's own lookups pass freshly built strings that the by-address memo cannot know), and a final mix so every
++// character reaches the low bits that pick the slot. The length comes from strlen first, so no load reads past the
++// name's end; unaligned 8-byte loads are fine on x86.
++uint64_t MemoNameHash(const char* name, size_t& length) {
++    length = strlen(name);
++    uint64_t hash = 0x9E3779B97F4A7C15ULL ^ length;
++    const char* p = name;
++    const char* const end = name + length;
++    for (; end - p >= 8; p += 8) {
++        uint64_t word;
++        memcpy(&word, p, 8);
++        hash = (hash ^ word) * 0xBF58476D1CE4E5B9ULL;
++        hash ^= hash >> 31;
++    }
++    uint64_t tail = 0;
++    for (int shift = 0; p < end; p++, shift += 8) {
++        tail |= (uint64_t)(uint8_t)*p << shift;
++    }
++    hash = (hash ^ tail) * 0x94D049BB133111EBULL;
++    hash ^= hash >> 29;
++    hash *= 0xBF58476D1CE4E5B9ULL;
++    hash ^= hash >> 32;
++    return hash | 1; // never 0, the empty slot's value
++}
++
++#if defined(__PROSPERO__) || defined(__PS4__)
++// A miss that really loaded something (read from an archive, or waited for the loader thread): Keep Game Speed
++// leaves it out of the frame or game-logic cost (ship/utils/Ps4Stalls.h). Loads nested in it count as theirs.
++struct MemoLoadTimer {
++    double stallBefore = gPs4Stalls.ms;
++    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
++    ~MemoLoadTimer() {
++        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() -
++                          (gPs4Stalls.ms - stallBefore);
++        if (ms > 0.25) {
++            gPs4Stalls.ms += ms;
++            gPs4Stalls.resources++;
++        }
++    }
++};
++#endif
++
++const std::shared_ptr<IResource> kNoResource;
++} // namespace
++
++void ResourceManager::BumpCacheGeneration() {
++    mCacheGeneration.fetch_add(1, std::memory_order_acq_rel);
++}
++
++const std::shared_ptr<IResource>& ResourceManager::MemoLookup(const char* name, bool process) {
++    if (name == nullptr) {
++        return kNoResource;
++    }
++    const uint32_t generation = mCacheGeneration.load(std::memory_order_acquire);
++    const size_t ptrSet = MemoPtrSet(name);
++    {
++        ResourceMemo& memo = ThreadMemo(generation);
++        const auto* ways = &memo.ptrs[ptrSet * 2];
++        for (size_t w = 0; w < 2; w++) {
++            if (ways[w].ptr == name && ways[w].name != 0) {
++                const auto& e = memo.names[ways[w].name - 1];
++                const size_t length = e.name.size();
++                // the text at the address may have changed: still the same path, terminator included
++                if (e.resource != nullptr && memcmp(e.name.data(), name, length) == 0 && name[length] == '\0' &&
++                    !e.resource->IsDirty()) {
++                    return e.resource;
++                }
++                break;
++            }
++        }
++    }
++    size_t length = 0;
++    const uint64_t hash = MemoNameHash(name, length);
++    const size_t nameSet = (size_t)(hash >> 7) & (kMemoSets - 1);
++    {
++        ResourceMemo& memo = ThreadMemo(generation);
++        for (size_t w = 0; w < 2; w++) {
++            auto& e = memo.names[nameSet * 2 + w];
++            if (e.hash == hash && e.resource != nullptr && e.name.size() == length &&
++                memcmp(e.name.data(), name, length) == 0 && !e.resource->IsDirty()) {
++                MemoRememberPtr(memo, ptrSet, name, (uint32_t)(nameSet * 2 + w));
++                return e.resource;
++            }
++        }
++    }
++    // the path the uncached call takes (the identifier overloads do not use the memo)
++    std::shared_ptr<IResource> resource;
++    {
++#if defined(__PROSPERO__) || defined(__PS4__)
++        MemoLoadTimer timer;
++#endif
++        resource = process ? LoadResourceProcess(ResourceIdentifier{ std::string(name, length), mDefaultCacheOwner,
++                                                                     mDefaultCacheArchive },
++                                                 false, nullptr)
++                           : LoadResource(
++                                 ResourceIdentifier{ std::string(name, length), mDefaultCacheOwner, mDefaultCacheArchive },
++                                 false, nullptr);
++    }
++    if (resource == nullptr) {
++        return kNoResource;
++    }
++    ResourceMemo& memo = ThreadMemo(mCacheGeneration.load(std::memory_order_acquire));
++    if (memo.generation != generation) {
++        memo.scratch = std::move(resource);
++        return memo.scratch;
++    }
++    auto* ways = &memo.names[nameSet * 2];
++    const size_t way = MemoFillWay(
++        memo, nameSet, 1,
++        [&](size_t w) {
++            return ways[w].hash == hash && ways[w].name.size() == length && memcmp(ways[w].name.data(), name, length) == 0;
++        },
++        [&](size_t w) { return ways[w].resource == nullptr; });
++    auto& e = ways[way];
++    e.hash = hash;
++    e.name.assign(name, length);
++    e.resource = std::move(resource);
++    MemoRememberPtr(memo, ptrSet, name, (uint32_t)(nameSet * 2 + way));
++    return e.resource;
++}
++
++const std::shared_ptr<IResource>& ResourceManager::MemoLookup(uint64_t crc) {
++    const uint32_t generation = mCacheGeneration.load(std::memory_order_acquire);
++    const size_t set = (size_t)((crc ^ (crc >> 29) ^ (crc >> 47)) & (kMemoSets - 1));
++    {
++        auto* ways = &ThreadMemo(generation).crcs[set * 2];
++        for (size_t w = 0; w < 2; w++) {
++            if (ways[w].crc == crc && ways[w].resource != nullptr && !ways[w].resource->IsDirty()) {
++                return ways[w].resource;
++            }
++        }
++    }
++    const std::string* hashStr = GetArchiveManager()->HashToString(crc);
++    if (hashStr == nullptr || hashStr->length() == 0) {
++        SPDLOG_TRACE("ResourceLoad: Unknown crc {}\n", crc);
++        return kNoResource;
++    }
++    std::shared_ptr<IResource> resource;
++    {
++#if defined(__PROSPERO__) || defined(__PS4__)
++        MemoLoadTimer timer;
++#endif
++        resource =
++            LoadResource(ResourceIdentifier{ *hashStr, mDefaultCacheOwner, mDefaultCacheArchive }, false, nullptr);
++    }
++    if (resource == nullptr) {
++        return kNoResource;
++    }
++    ResourceMemo& memo = ThreadMemo(mCacheGeneration.load(std::memory_order_acquire));
++    if (memo.generation != generation) {
++        memo.scratch = std::move(resource);
++        return memo.scratch;
++    }
++    auto* ways = &memo.crcs[set * 2];
++    const size_t way = MemoFillWay(
++        memo, set, 2, [&](size_t w) { return ways[w].crc == crc; },
++        [&](size_t w) { return ways[w].resource == nullptr; });
++    auto& e = ways[way];
++    e.crc = crc;
++    e.resource = std::move(resource);
++    return e.resource;
++}
++
+ ResourceFilter::ResourceFilter(const std::list<std::string>& includeMasks, const std::list<std::string>& excludeMasks,
+                                const uintptr_t owner, const std::shared_ptr<Archive> parent)
+     : IncludeMasks(includeMasks), ExcludeMasks(excludeMasks), Owner(owner), Parent(parent) {
+@@ -155,7 +423,19 @@ std::shared_ptr<IResource> ResourceManager::LoadResourceProcess(const ResourceId
+     auto file = LoadFileProcess(identifier.Path);
+     if (file == nullptr && !mArchiveManager->HasFile(identifier.Path + ".meta")) {
+         SPDLOG_TRACE("Failed to load resource file at path {}", identifier.Path);
+-        mResourceCache[identifier] = ResourceLoadError::NotFound;
++        {
++            // the previous value is released after the lock: a resource's destructor may load others
++            std::variant<ResourceLoadError, std::shared_ptr<IResource>> previous;
++            {
++                const std::lock_guard<std::mutex> lock(mMutex);
++                auto& line = mResourceCache[identifier];
++                if (std::holds_alternative<std::shared_ptr<IResource>>(line)) {
++                    BumpCacheGeneration(); // a resource memos may hold goes away
++                }
++                previous = std::move(line);
++                line = ResourceLoadError::NotFound;
++            }
++        }
+         return nullptr;
+     }
+ 
+@@ -176,10 +456,15 @@ std::shared_ptr<IResource> ResourceManager::LoadResourceProcess(const ResourceId
+         }
+ 
+         // Set the cache to the loaded resource
++        auto& line = mResourceCache[identifier];
++        if (std::holds_alternative<std::shared_ptr<IResource>>(line) &&
++            std::get<std::shared_ptr<IResource>>(line) != resource) {
++            BumpCacheGeneration(); // replaces a resource memos may hold (a dirty one being reloaded)
++        }
+         if (resource != nullptr) {
+-            mResourceCache[identifier] = resource;
++            line = resource;
+         } else {
+-            mResourceCache[identifier] = ResourceLoadError::NotFound;
++            line = ResourceLoadError::NotFound;
+         }
+     }
+ 
+@@ -194,9 +479,24 @@ std::shared_ptr<IResource> ResourceManager::LoadResourceProcess(const ResourceId
+ 
+ std::shared_ptr<IResource> ResourceManager::LoadResourceProcess(const std::string& filePath, bool loadExact,
+                                                                 std::shared_ptr<ResourceInitData> initData) {
++    if (!loadExact && initData == nullptr) {
++        return MemoLookup(filePath.c_str(), true);
++    }
+     return LoadResourceProcess({ filePath, mDefaultCacheOwner, mDefaultCacheArchive }, loadExact, initData);
+ }
+ 
++std::shared_ptr<IResource> ResourceManager::LoadResourceProcess(const char* filePath, bool loadExact,
++                                                                std::shared_ptr<ResourceInitData> initData) {
++    if (filePath == nullptr) {
++        return nullptr;
++    }
++    if (!loadExact && initData == nullptr) {
++        return MemoLookup(filePath, true);
++    }
++    return LoadResourceProcess({ std::string(filePath), mDefaultCacheOwner, mDefaultCacheArchive }, loadExact,
++                               initData);
++}
++
+ std::shared_future<std::shared_ptr<IResource>>
+ ResourceManager::LoadResourceAsync(const ResourceIdentifier& identifier, bool loadExact, BS::priority_t priority,
+                                    std::shared_ptr<ResourceInitData> initData) {
+@@ -229,6 +529,13 @@ ResourceManager::LoadResourceAsync(const std::string& filePath, bool loadExact,
+ 
+ std::shared_ptr<IResource> ResourceManager::LoadResource(const ResourceIdentifier& identifier, bool loadExact,
+                                                          std::shared_ptr<ResourceInitData> initData) {
++    // cached: straight from the cache (LoadResourceAsync would wrap it in a ready promise/future)
++    if (!OtrSignatureCheck(identifier.Path.c_str())) {
++        auto cached = GetCachedResource(identifier, loadExact);
++        if (cached != nullptr) {
++            return cached;
++        }
++    }
+     auto resource = LoadResourceAsync(identifier, loadExact, BS::pr::highest, initData).get();
+     if (resource == nullptr) {
+         SPDLOG_TRACE("Failed to load resource file at path {}", identifier.Path);
+@@ -238,11 +545,17 @@ std::shared_ptr<IResource> ResourceManager::LoadResource(const ResourceIdentifie
+ 
+ std::shared_ptr<IResource> ResourceManager::LoadResource(const std::string& filePath, bool loadExact,
+                                                          std::shared_ptr<ResourceInitData> initData) {
++    if (!loadExact && initData == nullptr) {
++        return MemoLookup(filePath.c_str(), false);
++    }
+     return LoadResource({ filePath, mDefaultCacheOwner, mDefaultCacheArchive }, loadExact, initData);
+ }
+ 
+ std::shared_ptr<IResource> ResourceManager::LoadResource(uint64_t crc, bool loadExact,
+                                                          std::shared_ptr<ResourceInitData> initData) {
++    if (!loadExact && initData == nullptr) {
++        return MemoLookup(crc);
++    }
+     const std::string* hashStr = GetArchiveManager()->HashToString(crc);
+     if (hashStr == nullptr || hashStr->length() == 0) {
+         SPDLOG_TRACE("ResourceLoad: Unknown crc {}\n", crc);
+@@ -419,7 +732,9 @@ size_t ResourceManager::UnloadResource(const ResourceIdentifier& identifier) {
+     // We can only erase the resource if we have any resources for that owner.
+     if (mResourceCache.contains(identifier)) {
+         const std::lock_guard<std::mutex> lock(mMutex);
+-        mResourceCache.erase(identifier);
++        if (mResourceCache.erase(identifier) != 0) {
++            BumpCacheGeneration();
++        }
+     }
+ 
+     return ret;
+@@ -432,6 +747,7 @@ size_t ResourceManager::UnloadResource(const std::string& filePath) {
+ void ResourceManager::CacheExternalResource(const std::string& filePath, std::shared_ptr<IResource> resource) {
+     const std::lock_guard<std::mutex> lock(mMutex);
+     mResourceCache[{ filePath, mDefaultCacheOwner, mDefaultCacheArchive }] = resource;
++    BumpCacheGeneration();
+ }
+ 
+ bool ResourceManager::WriteResource(const ResourceIdentifier& identifier, const std::vector<uint8_t>& data,
+@@ -458,8 +774,8 @@ bool ResourceManager::WriteResource(const ResourceIdentifier& identifier, const
+ }
+ 
+ bool ResourceManager::OtrSignatureCheck(const char* fileName) {
+-    static const char* sOtrSignature = "__OTR__";
+-    return strncmp(fileName, sOtrSignature, strlen(sOtrSignature)) == 0;
++    static constexpr char sOtrSignature[] = "__OTR__";
++    return strncmp(fileName, sOtrSignature, sizeof(sOtrSignature) - 1) == 0; // (no strlen per texture command)
+ }
+ 
+ bool ResourceManager::IsAltAssetsEnabled() {
+@@ -467,7 +783,11 @@ bool ResourceManager::IsAltAssetsEnabled() {
+ }
+ 
+ void ResourceManager::SetAltAssetsEnabled(bool isEnabled) {
++    const bool changed = mAltAssetsEnabled != isEnabled;
+     mAltAssetsEnabled = isEnabled;
++    if (changed) {
++        BumpCacheGeneration(); // after the switch: a memo filled from here on resolves the new way
++    }
+ }
+ 
+ size_t ResourceManager::GetResourceSize(std::shared_ptr<IResource> resource) {
+@@ -479,15 +799,13 @@ size_t ResourceManager::GetResourceSize(std::shared_ptr<IResource> resource) {
+ }
+ 
+ size_t ResourceManager::GetResourceSize(const char* name) {
+-    auto resource = LoadResource(name);
+-
+-    return GetResourceSize(resource);
++    const auto& resource = MemoLookup(name, false);
++    return resource != nullptr ? resource->GetPointerSize() : 0;
+ }
+ 
+ size_t ResourceManager::GetResourceSize(uint64_t crc) {
+-    auto resource = LoadResource(crc);
+-
+-    return GetResourceSize(resource);
++    const auto& resource = MemoLookup(crc);
++    return resource != nullptr ? resource->GetPointerSize() : 0;
+ }
+ 
+ bool ResourceManager::GetResourceIsCustom(std::shared_ptr<IResource> resource) {
+@@ -499,15 +817,13 @@ bool ResourceManager::GetResourceIsCustom(std::shared_ptr<IResource> resource) {
+ }
+ 
+ bool ResourceManager::GetResourceIsCustom(const char* name) {
+-    auto resource = LoadResource(name);
+-
+-    return GetResourceIsCustom(resource);
++    const auto& resource = MemoLookup(name, false);
++    return resource != nullptr && resource->GetInitData()->IsCustom;
+ }
+ 
+ bool ResourceManager::GetResourceIsCustom(uint64_t crc) {
+-    auto resource = LoadResource(crc);
+-
+-    return GetResourceIsCustom(resource);
++    const auto& resource = MemoLookup(crc);
++    return resource != nullptr && resource->GetInitData()->IsCustom;
+ }
+ 
+ void* ResourceManager::GetResourceRawPointer(std::shared_ptr<IResource> resource) {
+@@ -519,15 +835,13 @@ void* ResourceManager::GetResourceRawPointer(std::shared_ptr<IResource> resource
+ }
+ 
+ void* ResourceManager::GetResourceRawPointer(const char* name) {
+-    auto resource = LoadResource(name);
+-
+-    return GetResourceRawPointer(resource);
++    const auto& resource = MemoLookup(name, false);
++    return resource != nullptr ? resource->GetRawPointer() : nullptr;
+ }
+ 
+ void* ResourceManager::GetResourceRawPointer(uint64_t crc) {
+-    auto resource = LoadResource(crc);
+-
+-    return GetResourceRawPointer(resource);
++    const auto& resource = MemoLookup(crc);
++    return resource != nullptr ? resource->GetRawPointer() : nullptr;
+ }
+ 
+ } // namespace Ship
+diff --git a/src/ship/window/gui/Gui.cpp b/src/ship/window/gui/Gui.cpp
+index eeddd51..3bd3c7c 100644
+--- a/src/ship/window/gui/Gui.cpp
++++ b/src/ship/window/gui/Gui.cpp
+@@ -1,6 +1,6 @@
+ #define NOMINMAX
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+ #include <unistd.h>
+ #include <imgui.h>
+ #include <imgui_impl_sdl2.h>
+@@ -235,7 +235,7 @@ void Gui::DrawMenu() {
+ 
+     ImGui::DockSpace(dockId, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_None | ImGuiDockNodeFlags_NoDockingInCentralNode);
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     // PlayStation 5: ImGui's SDL backend may look for a controller before the pad is known: look again
+     if (!(ImGui::GetIO().BackendFlags & ImGuiBackendFlags_HasGamepad)) {
+         static unsigned frames;
+@@ -246,7 +246,7 @@ void Gui::DrawMenu() {
+ #endif
+ 
+     bool padToggle = ImGui::IsKeyPressed(TOGGLE_PAD_BTN, false);
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     // PlayStation 5: the touch pad's click (SDL "back") opens and closes the menu,
+     // read from SDL itself so it works before ImGui has found the pad and while
+     // controller navigation is off.
+@@ -290,7 +290,7 @@ void Gui::DrawMenu() {
+             mImGuiIo->ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
+         }
+     }
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     // PlayStation 5: the pad is the only input, so gamepad navigation follows the
+     // menu's visibility every frame (a toggle's visibility can settle a frame late).
+     {
+@@ -405,12 +405,12 @@ void Gui::StartFrame() {
+     ImGui::NewFrame();
+ }
+ 
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+ extern "C" float ps5_fps_avg, ps5_fps_low, ps5_frame_max;
+ #endif
+ 
+ void Gui::EndFrame() {
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) || defined(__PS4__)
+     // gPS5.FpsOverlay=1: the last 10 s window's numbers (see gfx_vulkan.cpp), top-left
+     if (Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger("gPS5.FpsOverlay", 0)) {
+         const float f = ImGui::GetIO().Framerate;
+diff --git a/include/ship/utils/Ps4Stalls.h b/include/ship/utils/Ps4Stalls.h
+new file mode 100644
+index 0000000..fe3a503
+--- /dev/null
++++ b/include/ship/utils/Ps4Stalls.h
+@@ -0,0 +1,18 @@
++#pragma once
++
++#include <cstdint>
++
++#if defined(__PROSPERO__) || defined(__PS4__)
++// One-off work a thread does in the middle of its frames: resources read from the archives (a mod's models and
++// textures the first time they are drawn), textures decoded and uploaded, shaders compiled and pipelines made.
++// Each thread adds up its own (the renderer's thread is the game's). Keep Game Speed (soh/OTRGlobals.cpp) leaves
++// it out of the frame and game-logic costs it picks a frame rate from, and its report names it.
++// Defined in fast/backends/gfx_vulkan.cpp.
++struct Ps4Stalls {
++    double ms = 0;          // all of it, milliseconds
++    uint32_t resources = 0; // resources loaded
++    uint32_t textures = 0;  // textures decoded and uploaded
++    uint32_t shaders = 0;   // shaders compiled and pipelines created
++};
++extern thread_local Ps4Stalls gPs4Stalls;
++#endif
